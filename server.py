@@ -387,7 +387,10 @@ class GhosttyBackend(TerminalBackend):
         sorted_procs = sorted(claude_procs, key=lambda p: (p['session'] is None, p['pid']))
 
         for proc in sorted_procs:
-            session_name = proc['session'] or f"pid-{proc['pid']}"
+            # Only track sessions explicitly started with claude-remote -s <name>
+            if not proc['session']:
+                continue
+            session_name = proc['session']
 
             # Try to find matching terminal content
             matched_content = ""

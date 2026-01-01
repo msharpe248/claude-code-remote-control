@@ -28,44 +28,66 @@ get_tmux_sessions() {
     fi
 }
 
-# Find claude processes and their session names
+# Find claude processes and categorize them
+# Output format: monitored|session_name|pid  OR  unmonitored||pid
 get_claude_sessions() {
-    # Find all claude processes
-    local claude_pids=$(pgrep -f "claude" 2>/dev/null | head -20 || true)
+    # Find all processes - we'll filter carefully
+    local all_pids=$(pgrep -f "claude" 2>/dev/null | head -30 || true)
 
-    for pid in $claude_pids; do
-        # Skip if not a real claude process
+    # Track which PIDs we've already processed (to avoid duplicates)
+    local processed_pids=""
+
+    for pid in $all_pids; do
+        # Skip if already processed
+        [[ "$processed_pids" == *"|$pid|"* ]] && continue
+
         local cmdline=$(ps -p "$pid" -o args= 2>/dev/null || true)
+        [ -z "$cmdline" ] && continue
 
-        # Skip server.py, ourselves, and other non-claude processes
+        # Skip non-claude processes (server, tools, grep, etc.)
         if [[ "$cmdline" == *"server.py"* ]] || \
            [[ "$cmdline" == *"cc-status"* ]] || \
            [[ "$cmdline" == *"cc-diagnose"* ]] || \
-           [[ "$cmdline" == *"pgrep"* ]]; then
+           [[ "$cmdline" == *"cc-test-notify"* ]] || \
+           [[ "$cmdline" == *"cc-logs"* ]] || \
+           [[ "$cmdline" == *"pgrep"* ]] || \
+           [[ "$cmdline" == *"grep"* ]]; then
+            continue
+        fi
+
+        # Skip claude-remote itself - we'll find it via the child claude process
+        if [[ "$cmdline" == *"claude-remote"* ]]; then
             continue
         fi
 
         # Check if this is the actual claude binary
-        if [[ "$cmdline" == *"/claude"* ]] || [[ "$cmdline" =~ ^claude ]]; then
+        # Match: /path/to/claude, or just "claude" at start, but not "claude-remote"
+        if [[ "$cmdline" =~ /claude[[:space:]] ]] || [[ "$cmdline" =~ ^claude[[:space:]] ]] || \
+           [[ "$cmdline" =~ /claude$ ]] || [[ "$cmdline" == "claude" ]]; then
+
+            processed_pids="$processed_pids|$pid|"
+
             # Get parent PID
             local ppid=$(ps -p "$pid" -o ppid= 2>/dev/null | tr -d ' ' || true)
             local session_name=""
+            local is_monitored="unmonitored"
 
             if [ -n "$ppid" ]; then
                 # Check if parent is claude-remote with -s
                 local parent_cmd=$(ps -p "$ppid" -o args= 2>/dev/null || true)
                 if [[ "$parent_cmd" == *"claude-remote"* ]]; then
+                    # Mark the parent as processed too
+                    processed_pids="$processed_pids|$ppid|"
+
                     # Extract session name from -s or --session argument
                     session_name=$(echo "$parent_cmd" | grep -oE '(-s|--session)[[:space:]]+[^[:space:]]+' | awk '{print $2}' || true)
+                    if [ -n "$session_name" ]; then
+                        is_monitored="monitored"
+                    fi
                 fi
             fi
 
-            # Default session name if not found
-            if [ -z "$session_name" ]; then
-                session_name="(pid:$pid)"
-            fi
-
-            echo "$session_name|$pid"
+            echo "$is_monitored|$session_name|$pid"
         fi
     done
 }
@@ -125,19 +147,46 @@ main() {
     fi
     echo ""
 
-    # Claude sessions
-    echo -e "${BOLD}Claude Sessions:${NC}"
-    local sessions=$(get_claude_sessions)
+    # Claude sessions - try to get from server first, fall back to process detection
+    local server_sessions=""
+    if [ -n "$server_pid" ]; then
+        local port=$(grep 'port:' "$SCRIPT_DIR/config.yaml" 2>/dev/null | head -1 | sed 's/.*port:[[:space:]]*//' | tr -d ' ' || echo "8765")
+        # Query server API for sessions (no auth needed for status endpoint typically)
+        server_sessions=$(curl -s --max-time 2 "http://localhost:$port/api/status" 2>/dev/null | \
+            python3 -c "import sys,json; d=json.load(sys.stdin); s=d.get('sessions',[]); print('\n'.join(s) if isinstance(s,list) else '\n'.join(s.keys()))" 2>/dev/null || true)
+    fi
 
-    if [ -n "$sessions" ]; then
-        echo "$sessions" | while IFS='|' read -r name pid; do
-            echo -e "  ${GREEN}●${NC} ${BOLD}$name${NC} (PID: $pid)"
+    echo -e "${BOLD}Monitored Sessions:${NC}"
+    if [ -n "$server_sessions" ]; then
+        echo "$server_sessions" | while read -r sess; do
+            [ -n "$sess" ] && echo -e "  ${BOLD}${YELLOW}✻${NC} ${BOLD}$sess${NC}"
         done
     else
-        echo -e "  ${YELLOW}○${NC} No Claude instances running"
-        echo -e "  ${CYAN}→${NC} Start with: ./claude-remote -s <session-name>"
+        # Fall back to process detection
+        local sessions=$(get_claude_sessions)
+        local monitored=$(echo "$sessions" | grep "^monitored|" || true)
+
+        if [ -n "$monitored" ]; then
+            echo "$monitored" | while IFS='|' read -r status name pid; do
+                echo -e "  ${BOLD}${YELLOW}✻${NC} ${BOLD}$name${NC} (PID: $pid)"
+            done
+        else
+            echo -e "  ${YELLOW}○${NC} None"
+            echo -e "  ${CYAN}→${NC} Start with: ./claude-remote -s <session-name>"
+        fi
     fi
     echo ""
+
+    # Show other Claude instances not tracked by server
+    local sessions=$(get_claude_sessions)
+    local unmonitored=$(echo "$sessions" | grep "^unmonitored|" || true)
+    if [ -n "$unmonitored" ]; then
+        echo -e "${BOLD}Other Claude Instances:${NC} ${YELLOW}(not monitored)${NC}"
+        echo "$unmonitored" | while IFS='|' read -r status name pid; do
+            echo -e "  ${YELLOW}○${NC} PID: $pid"
+        done
+        echo ""
+    fi
 
     # tmux session details (if any)
     if [ -n "$tmux_sessions" ]; then
