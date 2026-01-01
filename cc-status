@@ -1,0 +1,166 @@
+#!/bin/bash
+# cc-status - Show Claude Code remote control session status
+#
+# Detects running Claude instances, their session names, and backend type.
+
+set -e
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Check if Ghostty is running
+is_ghostty_running() {
+    pgrep -f "Ghostty.app" >/dev/null 2>&1
+}
+
+# Check if tmux is available and has sessions
+get_tmux_sessions() {
+    if command -v tmux &>/dev/null; then
+        tmux list-sessions -F "#{session_name}" 2>/dev/null || true
+    fi
+}
+
+# Find claude processes and their session names
+get_claude_sessions() {
+    # Find all claude processes
+    local claude_pids=$(pgrep -f "claude" 2>/dev/null | head -20 || true)
+
+    for pid in $claude_pids; do
+        # Skip if not a real claude process
+        local cmdline=$(ps -p "$pid" -o args= 2>/dev/null || true)
+
+        # Skip server.py, ourselves, and other non-claude processes
+        if [[ "$cmdline" == *"server.py"* ]] || \
+           [[ "$cmdline" == *"cc-status"* ]] || \
+           [[ "$cmdline" == *"cc-diagnose"* ]] || \
+           [[ "$cmdline" == *"pgrep"* ]]; then
+            continue
+        fi
+
+        # Check if this is the actual claude binary
+        if [[ "$cmdline" == *"/claude"* ]] || [[ "$cmdline" =~ ^claude ]]; then
+            # Get parent PID
+            local ppid=$(ps -p "$pid" -o ppid= 2>/dev/null | tr -d ' ' || true)
+            local session_name=""
+
+            if [ -n "$ppid" ]; then
+                # Check if parent is claude-remote with -s
+                local parent_cmd=$(ps -p "$ppid" -o args= 2>/dev/null || true)
+                if [[ "$parent_cmd" == *"claude-remote"* ]]; then
+                    # Extract session name from -s or --session argument
+                    session_name=$(echo "$parent_cmd" | grep -oE '(-s|--session)[[:space:]]+[^[:space:]]+' | awk '{print $2}' || true)
+                fi
+            fi
+
+            # Default session name if not found
+            if [ -z "$session_name" ]; then
+                session_name="(pid:$pid)"
+            fi
+
+            echo "$session_name|$pid"
+        fi
+    done
+}
+
+# Check if server is running
+get_server_status() {
+    local server_pid=$(pgrep -f "python3.*server.py" 2>/dev/null | head -1 || true)
+    if [ -n "$server_pid" ]; then
+        echo "$server_pid"
+    fi
+}
+
+# Main
+main() {
+    echo -e "${BOLD}${BLUE}Claude Code Remote Control - Status${NC}"
+    echo -e "${BLUE}════════════════════════════════════${NC}"
+    echo ""
+
+    # Backend detection
+    echo -e "${BOLD}Backend:${NC}"
+    local backend="none"
+
+    if is_ghostty_running; then
+        echo -e "  ${GREEN}●${NC} Ghostty: ${GREEN}running${NC}"
+        backend="ghostty"
+    else
+        echo -e "  ${YELLOW}○${NC} Ghostty: not running"
+    fi
+
+    local tmux_sessions=$(get_tmux_sessions)
+    if [ -n "$tmux_sessions" ]; then
+        local count=$(echo "$tmux_sessions" | wc -l | tr -d ' ')
+        echo -e "  ${GREEN}●${NC} tmux: ${GREEN}$count session(s)${NC}"
+        if [ "$backend" = "none" ]; then
+            backend="tmux"
+        fi
+    else
+        if command -v tmux &>/dev/null; then
+            echo -e "  ${YELLOW}○${NC} tmux: no sessions"
+        else
+            echo -e "  ${RED}○${NC} tmux: not installed"
+        fi
+    fi
+    echo ""
+
+    # Server status
+    echo -e "${BOLD}Server:${NC}"
+    local server_pid=$(get_server_status)
+    if [ -n "$server_pid" ]; then
+        local port=$(grep 'port:' "$SCRIPT_DIR/config.yaml" 2>/dev/null | head -1 | sed 's/.*port:[[:space:]]*//' | tr -d ' ' || echo "8765")
+        local ip=$(ipconfig getifaddr en0 2>/dev/null || echo "localhost")
+        echo -e "  ${GREEN}●${NC} Running (PID: $server_pid)"
+        echo -e "  ${CYAN}→${NC} http://$ip:$port/"
+    else
+        echo -e "  ${YELLOW}○${NC} Not running"
+        echo -e "  ${CYAN}→${NC} Start with: ./start.sh"
+    fi
+    echo ""
+
+    # Claude sessions
+    echo -e "${BOLD}Claude Sessions:${NC}"
+    local sessions=$(get_claude_sessions)
+
+    if [ -n "$sessions" ]; then
+        echo "$sessions" | while IFS='|' read -r name pid; do
+            echo -e "  ${GREEN}●${NC} ${BOLD}$name${NC} (PID: $pid)"
+        done
+    else
+        echo -e "  ${YELLOW}○${NC} No Claude instances running"
+        echo -e "  ${CYAN}→${NC} Start with: ./claude-remote -s <session-name>"
+    fi
+    echo ""
+
+    # tmux session details (if any)
+    if [ -n "$tmux_sessions" ]; then
+        echo -e "${BOLD}tmux Sessions:${NC}"
+        echo "$tmux_sessions" | while read -r sess; do
+            # Check if Claude is running in this session
+            local has_claude=""
+            if tmux capture-pane -t "$sess" -p 2>/dev/null | grep -q "claude\|Claude"; then
+                has_claude="${GREEN}(claude)${NC}"
+            fi
+            echo -e "  ${CYAN}●${NC} $sess $has_claude"
+        done
+        echo ""
+    fi
+
+    # Config info
+    if [ -f "$SCRIPT_DIR/config.yaml" ]; then
+        local notify_mode=$(grep '^[[:space:]]*mode:' "$SCRIPT_DIR/config.yaml" 2>/dev/null | head -1 | sed 's/.*mode:[[:space:]]*"\([^"]*\)".*/\1/' || echo "unknown")
+        local ntfy_enabled=$(grep -A5 'ntfy:' "$SCRIPT_DIR/config.yaml" 2>/dev/null | grep 'enabled:' | head -1 | sed 's/.*enabled:[[:space:]]*//' || echo "false")
+        echo -e "${BOLD}Config:${NC}"
+        echo -e "  Notification mode: ${CYAN}$notify_mode${NC}"
+        echo -e "  ntfy enabled: ${CYAN}$ntfy_enabled${NC}"
+    fi
+}
+
+main "$@"

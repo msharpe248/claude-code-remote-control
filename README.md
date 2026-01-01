@@ -223,6 +223,43 @@ All endpoints accept `?session=<name>` to target a specific session.
 - **ntfy topics are public** - Use unique, unguessable prefix
 - For internet: add TLS (nginx/caddy) + stronger auth
 
+## Support Tools
+
+Diagnostic and support tools are included to help troubleshoot issues.
+
+### cc-status
+Show current status of Claude sessions, backends, and server.
+```bash
+./cc-status
+```
+
+### cc-diagnose
+Run comprehensive diagnostics to check dependencies, permissions, config, and connectivity.
+```bash
+./cc-diagnose
+```
+
+### cc-test-notify
+Send a test notification without starting the server.
+```bash
+./cc-test-notify                    # Send to default "test" session
+./cc-test-notify -s work            # Send to specific session topic
+./cc-test-notify -m "Hello"         # Custom message
+./cc-test-notify --dry-run          # Show what would be sent
+```
+
+### cc-logs
+View and filter server logs.
+```bash
+./cc-logs                           # Show last 100 lines
+./cc-logs -f                        # Follow logs in real-time
+./cc-logs -e                        # Show errors only
+./cc-logs -s work                   # Filter by session
+./cc-logs --prompts                 # Show prompt detections only
+./cc-logs --notify                  # Show notification events only
+./cc-logs -g 'pattern'              # Grep for pattern
+```
+
 ## Troubleshooting
 
 ### WebSocket not connecting
@@ -266,6 +303,10 @@ remotecontrol/
 ├── start.sh             # Startup script
 ├── install.sh           # Installation
 ├── uninstall.sh         # Cleanup
+├── cc-status            # Show session/server status
+├── cc-diagnose          # Run diagnostics
+├── cc-test-notify       # Test notifications
+├── cc-logs              # View/filter logs
 ├── README.md
 └── venv/                # Python virtual environment
 ```

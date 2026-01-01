@@ -1,0 +1,200 @@
+#!/usr/bin/env python3
+"""
+cc-test-notify - Send a test notification via configured backends.
+
+Usage:
+    cc-test-notify              # Send to default session
+    cc-test-notify -s work      # Send to specific session topic
+    cc-test-notify -m "Hello"   # Custom message
+    cc-test-notify --dry-run    # Show what would be sent
+"""
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+import requests
+import yaml
+
+SCRIPT_DIR = Path(__file__).parent
+CONFIG_PATH = SCRIPT_DIR / "config.yaml"
+
+# Colors
+GREEN = '\033[0;32m'
+YELLOW = '\033[1;33m'
+RED = '\033[0;31m'
+CYAN = '\033[0;36m'
+BOLD = '\033[1m'
+NC = '\033[0m'
+
+
+def load_config():
+    """Load configuration from config.yaml."""
+    if not CONFIG_PATH.exists():
+        print(f"{RED}Error:{NC} config.yaml not found")
+        print(f"  Run: cp config.yaml.example config.yaml")
+        sys.exit(1)
+
+    with open(CONFIG_PATH) as f:
+        return yaml.safe_load(f)
+
+
+def send_ntfy(config, session, message, title, dry_run=False):
+    """Send notification via ntfy."""
+    ntfy_cfg = config.get('notifications', {}).get('ntfy', {})
+
+    if not ntfy_cfg.get('enabled', False):
+        print(f"{YELLOW}ntfy:{NC} disabled in config")
+        return False
+
+    server = ntfy_cfg.get('server', 'https://ntfy.sh')
+    prefix = ntfy_cfg.get('topic_prefix', 'claude')
+    priority = ntfy_cfg.get('priority', 'default')
+    topic = f"{prefix}-{session}"
+
+    url = f"{server}/{topic}"
+
+    headers = {
+        'Title': title,
+        'Priority': priority,
+        'Tags': 'robot',
+    }
+
+    # Add action buttons
+    port = config.get('server', {}).get('port', 8765)
+    actions = f"view, Open, http://localhost:{port}/?session={session}, clear=true"
+    headers['Actions'] = actions
+
+    if dry_run:
+        print(f"{CYAN}ntfy:{NC} Would send to {url}")
+        print(f"  Title: {title}")
+        print(f"  Message: {message}")
+        print(f"  Priority: {priority}")
+        print(f"  Headers: {json.dumps(headers, indent=2)}")
+        return True
+
+    try:
+        response = requests.post(url, data=message.encode('utf-8'), headers=headers, timeout=10)
+        if response.ok:
+            print(f"{GREEN}ntfy:{NC} Sent to topic '{topic}'")
+            print(f"  Server: {server}")
+            print(f"  Response: {response.status_code}")
+            return True
+        else:
+            print(f"{RED}ntfy:{NC} Failed ({response.status_code})")
+            print(f"  Response: {response.text[:200]}")
+            return False
+    except requests.exceptions.RequestException as e:
+        print(f"{RED}ntfy:{NC} Error - {e}")
+        return False
+
+
+def send_pushover(config, message, title, dry_run=False):
+    """Send notification via Pushover."""
+    pushover_cfg = config.get('notifications', {}).get('pushover', {})
+
+    if not pushover_cfg.get('enabled', False):
+        print(f"{YELLOW}pushover:{NC} disabled in config")
+        return False
+
+    user_key = pushover_cfg.get('user_key', '')
+    api_token = pushover_cfg.get('api_token', '')
+
+    if not user_key or not api_token:
+        print(f"{RED}pushover:{NC} missing user_key or api_token")
+        return False
+
+    if dry_run:
+        print(f"{CYAN}pushover:{NC} Would send notification")
+        print(f"  Title: {title}")
+        print(f"  Message: {message}")
+        print(f"  User: {user_key[:8]}...")
+        return True
+
+    try:
+        response = requests.post(
+            'https://api.pushover.net/1/messages.json',
+            data={
+                'token': api_token,
+                'user': user_key,
+                'title': title,
+                'message': message,
+                'priority': 1,
+            },
+            timeout=10
+        )
+        if response.ok:
+            print(f"{GREEN}pushover:{NC} Sent successfully")
+            return True
+        else:
+            print(f"{RED}pushover:{NC} Failed ({response.status_code})")
+            print(f"  Response: {response.text[:200]}")
+            return False
+    except requests.exceptions.RequestException as e:
+        print(f"{RED}pushover:{NC} Error - {e}")
+        return False
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Send a test notification via configured backends.'
+    )
+    parser.add_argument('-s', '--session', default='test',
+                        help='Session name for ntfy topic (default: test)')
+    parser.add_argument('-m', '--message', default='This is a test notification from cc-test-notify.',
+                        help='Message to send')
+    parser.add_argument('-t', '--title', default=None,
+                        help='Notification title (default: Claude [session])')
+    parser.add_argument('--dry-run', action='store_true',
+                        help='Show what would be sent without sending')
+    parser.add_argument('--ntfy-only', action='store_true',
+                        help='Only send via ntfy')
+    parser.add_argument('--pushover-only', action='store_true',
+                        help='Only send via Pushover')
+
+    args = parser.parse_args()
+
+    print(f"{BOLD}Claude Code Remote Control - Test Notification{NC}")
+    print(f"{'─' * 48}")
+    print()
+
+    config = load_config()
+
+    title = args.title or f"Claude [{args.session}]"
+    message = args.message
+
+    print(f"Session: {CYAN}{args.session}{NC}")
+    print(f"Title:   {CYAN}{title}{NC}")
+    print(f"Message: {CYAN}{message}{NC}")
+    print()
+
+    if args.dry_run:
+        print(f"{YELLOW}DRY RUN - not actually sending{NC}")
+        print()
+
+    success = False
+
+    if not args.pushover_only:
+        if send_ntfy(config, args.session, message, title, args.dry_run):
+            success = True
+        print()
+
+    if not args.ntfy_only:
+        if send_pushover(config, message, title, args.dry_run):
+            success = True
+        print()
+
+    if success:
+        print(f"{GREEN}Done!{NC}")
+        if not args.dry_run:
+            print(f"Check your phone for the notification.")
+    else:
+        print(f"{RED}No notifications sent.{NC}")
+        print(f"Check config.yaml and ensure at least one backend is enabled.")
+        sys.exit(1)
+
+
+if __name__ == '__main__':
+    main()
