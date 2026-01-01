@@ -1,0 +1,21 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.Python
+
+# Config with secrets (use config.yaml.example for template)
+# Uncomment if you want to keep secrets out of git:
+# config.yaml
+
+# OS
+.DS_Store
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# Claude Code local settings
+.claude/

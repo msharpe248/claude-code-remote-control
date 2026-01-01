@@ -1,0 +1,190 @@
+# ============================================================================
+# Claude Code Remote Control - Configuration
+# ============================================================================
+#
+# This file controls how the remote control server works.
+# After changing settings, restart the server with: ./start.sh
+#
+
+# ----------------------------------------------------------------------------
+# SERVER SETTINGS
+# ----------------------------------------------------------------------------
+# The server provides the web interface you'll access from your phone
+
+server:
+  # Listen on all interfaces (0.0.0.0) to allow LAN access
+  # Change to 127.0.0.1 to only allow local connections
+  host: "0.0.0.0"
+
+  # Port for the web control panel
+  # Access at: http://<your-ip>:8765/
+  port: 8765
+
+# ----------------------------------------------------------------------------
+# AUTHENTICATION
+# ----------------------------------------------------------------------------
+# Protects the web interface from unauthorized access
+
+auth:
+  # Choose authentication method:
+  #   - none:  No authentication (only use on trusted networks!)
+  #   - basic: Username/password prompt (recommended)
+  #   - token: Secret URL parameter (?token=xxx)
+  method: "none"
+
+  # Basic auth credentials (when method: "basic")
+  username: "claude"
+  password: "9OESLrExg53n"  # <-- The install script replaces this!
+
+  # Token for URL-based auth (when method: "token")
+  # Access via: http://<ip>:8765/?token=<this-value>
+  token: "aeafdb75f67d5a0960ad1112e4b3ae10"  # <-- The install script replaces this!
+
+# ----------------------------------------------------------------------------
+# NOTIFICATIONS
+# ----------------------------------------------------------------------------
+# Get push notifications when Claude needs your input.
+# You can enable multiple backends - all enabled ones will be used.
+
+notifications:
+  # Notification mode:
+  #   - active:   Send notifications immediately when prompts detected
+  #   - standby:  Start paused, toggle on in web UI when needed
+  #   - log_only: Log notifications but don't send (for testing/debugging)
+  mode: "standby"
+
+  # NTFY.SH - Recommended for iOS
+  # Free, open source, no account required
+  # iOS App: https://apps.apple.com/app/ntfy/id1625396347
+  # Android: https://play.google.com/store/apps/details?id=io.heckel.ntfy
+  ntfy:
+    enabled: true
+
+    # Public server (free) or your own self-hosted instance
+    server: "https://ntfy.sh"
+
+    # Topic prefix - the tmux session name is appended automatically
+    # Final topic = {topic_prefix}-{session_name}
+    #
+    # Example: if prefix is "claude-msharpe" and session is "work"
+    #          the topic becomes "claude-msharpe-work"
+    #
+    # IMPORTANT: Choose something unique and hard to guess!
+    # Anyone who knows your topic can send you notifications.
+    # Bad:  "claude" (too common)
+    # Good: "claude-msharpe" or "myproject-abc123"
+    topic_prefix: "cc-mlws"
+
+    # Notification priority: min, low, default, high, max
+    priority: "high"
+
+  # PUSHOVER - Premium option
+  # One-time $5 purchase, very reliable
+  # Get it at: https://pushover.net/
+  pushover:
+    enabled: false
+
+    # Get these from your Pushover dashboard:
+    user_key: ""    # Your user key
+    api_token: ""   # Create an application to get this
+
+  # POLLING - Always available
+  # No external service needed - just refresh the web page
+  # The web UI auto-refreshes every 3 seconds
+  polling:
+    enabled: true
+
+# ----------------------------------------------------------------------------
+# TERMINAL BACKEND
+# ----------------------------------------------------------------------------
+# Choose how the server accesses terminal sessions.
+#
+# Supported backends:
+#   - auto:    Auto-detect (prefers Ghostty if available with Claude sessions)
+#   - tmux:    Use tmux sessions (cross-platform, requires tmux)
+#   - ghostty: Use Ghostty directly via macOS Accessibility API (macOS only)
+
+terminal_backend:
+  # Backend preference: auto | tmux | ghostty
+  prefer: "ghostty"
+
+# ----------------------------------------------------------------------------
+# TMUX SESSION (for tmux backend)
+# ----------------------------------------------------------------------------
+# When using tmux backend, the server watches ALL tmux sessions automatically.
+# This setting is only used as a fallback/default.
+
+tmux:
+  # Default session name (used as fallback when no sessions are active)
+  # The server auto-discovers and monitors all tmux sessions
+  session_name: "claude-remote"
+
+# ----------------------------------------------------------------------------
+# PROMPT DETECTION
+# ----------------------------------------------------------------------------
+# How the server detects when Claude is waiting for input
+#
+# The server uses smart detection:
+# - "Esc to cancel" = Question prompt (AskUserQuestion, confirmations)
+# - "? for shortcuts" = Idle prompt (ready for next instruction)
+# - "esc to interrupt" = Busy (Claude is working, ignore)
+#
+# The patterns below are fallback patterns for edge cases.
+
+detection:
+  # Fallback patterns (smart detection handles most cases)
+  # These are checked only if smart detection doesn't match
+  patterns:
+    - "❯"           # Claude Code's default prompt
+    - "? "          # Question prompts (AskUserQuestion)
+    - "> "          # Generic input prompts
+    - "Press Enter" # Confirmation prompts
+    - "(y/n)"       # Yes/no prompts
+    - "[Y/n]"       # Yes/no with default
+    - "[y/N]"       # Yes/no with default
+    # Note: "..." is skipped (too generic, matches spinner)
+
+  # How often to check for prompts (in seconds)
+  # Lower = more responsive but more CPU
+  # Higher = less responsive but saves resources
+  poll_interval: 2
+
+  # Minimum seconds between notifications
+  # Prevents notification spam when Claude outputs multiple prompts quickly
+  notification_cooldown: 30
+
+# ----------------------------------------------------------------------------
+# EMBEDDED TERMINAL
+# ----------------------------------------------------------------------------
+# xterm.js terminal embedded in the web panel (no separate ttyd needed)
+
+terminal:
+  # Terminal size (columns x rows)
+  cols: 120
+  rows: 30
+
+  # Scrollback buffer size
+  scrollback: 1000
+
+# ----------------------------------------------------------------------------
+# LOGGING
+# ----------------------------------------------------------------------------
+# Control server logging output
+
+logging:
+  # Log level: DEBUG, INFO, WARNING, ERROR
+  # DEBUG shows full prompt context when detected
+  level: "INFO"
+
+  # Write logs to server.log file (in addition to console)
+  file_enabled: true
+
+# ----------------------------------------------------------------------------
+# TESTING
+# ----------------------------------------------------------------------------
+# Options for testing and debugging
+# Note: For notification testing, use notifications.mode: "log_only"
+
+testing:
+  # Reserved for future testing options
+  # dry_run is now replaced by notifications.mode: "log_only"
