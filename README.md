@@ -2,6 +2,8 @@
 
 Control Claude Code from your phone. Get push notifications with action buttons when Claude needs input, respond quickly without being at your desk.
 
+> **Platform:** macOS only (Linux support planned)
+
 ```
 ┌─────────────────────────────────────────────────────────┐
 │  Desktop                                                │
@@ -63,8 +65,8 @@ Then open `http://<your-lan-ip>:8765/` on your phone.
 
 ## Terminal Backends
 
-### tmux (default, cross-platform)
-Traditional approach using tmux sessions. Works on macOS and Linux.
+### tmux (default)
+Traditional approach using tmux sessions.
 
 ```bash
 # Create a tmux session

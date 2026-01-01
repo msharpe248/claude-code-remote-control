@@ -659,6 +659,8 @@ class SessionState:
         self.pending_prompts = []
         self.prompt_history = []
         self.parsed_options = []
+        self.is_compacting = False  # Claude is compacting conversation
+        self.compacting_started_at = 0  # When compacting was detected (for minimum display time)
 
 class GlobalState:
     def __init__(self):
@@ -1047,6 +1049,15 @@ def detect_prompt(content):
 
     return False, None, None, None
 
+def detect_compacting(content):
+    """Check if Claude is compacting the conversation."""
+    if not content:
+        return False
+    # Check recent lines for compacting message
+    lines = content.strip().split('\n')
+    recent_text = '\n'.join(lines[-10:]).lower()
+    return "compacting conversation" in recent_text
+
 def watcher_loop():
     """Background thread that watches all terminal sessions for prompts."""
     global backend
@@ -1086,6 +1097,22 @@ def watcher_loop():
                 is_prompt, context, prompt_type, signature = detect_prompt(content)
 
                 session_state = state.get_session(session_name)
+
+                # Check for compacting state (with minimum 3s display time)
+                is_compacting_now = detect_compacting(content)
+                now = time.time()
+
+                if is_compacting_now and not session_state.is_compacting:
+                    # Just started compacting
+                    session_state.is_compacting = True
+                    session_state.compacting_started_at = now
+                    log.info(f"[{session_name}] Compacting conversation...")
+                elif not is_compacting_now and session_state.is_compacting:
+                    # Compacting might be done - but keep visible for minimum 3 seconds
+                    elapsed = now - session_state.compacting_started_at
+                    if elapsed >= 3.0:
+                        session_state.is_compacting = False
+                        log.info(f"[{session_name}] Compacting done")
 
                 if is_prompt:
                     # Check if this is a NEW prompt (different signature)
@@ -1467,6 +1494,69 @@ MAIN_TEMPLATE = """
         .status { padding: 1rem; border-radius: 8px; margin-bottom: 1rem; }
         .status.waiting { background: #2d4a3e; border-left: 4px solid #4ade80; }
         .status.idle { background: #2d3a4a; border-left: 4px solid #60a5fa; }
+        .status.compacting { background: #3d2d4a; border-left: 4px solid #c084fc; }
+
+        /* Brain crunching animation */
+        @keyframes brain-crunch {
+            0%, 100% { transform: scale(1) rotate(0deg); }
+            25% { transform: scale(1.1) rotate(-5deg); }
+            50% { transform: scale(0.9) rotate(5deg); }
+            75% { transform: scale(1.05) rotate(-3deg); }
+        }
+        @keyframes brain-pulse {
+            0%, 100% { opacity: 1; filter: brightness(1); }
+            50% { opacity: 0.8; filter: brightness(1.3); }
+        }
+        .brain-icon {
+            display: inline-block;
+            font-size: 1.5em;
+            animation: brain-crunch 0.6s ease-in-out infinite, brain-pulse 1s ease-in-out infinite;
+        }
+
+        /* Full-screen compacting overlay */
+        .compacting-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(13, 13, 26, 0.95);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 9999;
+            opacity: 0;
+            visibility: hidden;
+            transition: opacity 0.3s ease, visibility 0.3s ease;
+        }
+        .compacting-overlay.active {
+            opacity: 1;
+            visibility: visible;
+        }
+        .compacting-overlay .brain-large {
+            font-size: 5rem;
+            animation: brain-crunch 0.5s ease-in-out infinite, brain-glow 1.5s ease-in-out infinite;
+            margin-bottom: 1.5rem;
+        }
+        @keyframes brain-glow {
+            0%, 100% {
+                filter: drop-shadow(0 0 10px rgba(192, 132, 252, 0.5));
+            }
+            50% {
+                filter: drop-shadow(0 0 30px rgba(192, 132, 252, 0.9)) drop-shadow(0 0 60px rgba(192, 132, 252, 0.4));
+            }
+        }
+        .compacting-overlay .title {
+            font-size: 1.5rem;
+            font-weight: bold;
+            color: #c084fc;
+            margin-bottom: 0.5rem;
+        }
+        .compacting-overlay .subtitle {
+            font-size: 0.9rem;
+            color: #888;
+        }
 
         .prompt-box {
             background: #0d0d1a;
@@ -1589,6 +1679,13 @@ MAIN_TEMPLATE = """
     </style>
 </head>
 <body>
+    <!-- Compacting overlay - takes over the whole screen -->
+    <div id="compacting-overlay" class="compacting-overlay">
+        <div class="brain-large">🧠</div>
+        <div class="title">Compacting Conversation</div>
+        <div class="subtitle">Crunching context to fit more...</div>
+    </div>
+
     <div id="refresh-indicator" title="Auto-refreshing"></div>
     <div class="container">
         <h1>Claude Remote Control</h1>
@@ -1605,7 +1702,12 @@ MAIN_TEMPLATE = """
         {% endif %}
 
         <div id="status-area">
-            {% if pending_prompts %}
+            {% if is_compacting %}
+            <div class="status compacting">
+                <span class="brain-icon">🧠</span>
+                <strong>Compacting conversation...</strong>
+            </div>
+            {% elif pending_prompts %}
             <div class="status waiting">
                 <strong>Waiting for input!</strong>
             </div>
@@ -1806,6 +1908,38 @@ MAIN_TEMPLATE = """
             }, 5000);
         }
         scheduleRefresh();
+
+        // Fast polling for compacting state to show/hide overlay immediately
+        const compactingOverlay = document.getElementById('compacting-overlay');
+        let lastCompactingState = {{ 'true' if is_compacting else 'false' }};
+
+        // Show overlay immediately if already compacting on page load
+        if (lastCompactingState) {
+            compactingOverlay.classList.add('active');
+        }
+
+        function checkCompactingState() {
+            fetch('/api/status?session=' + encodeURIComponent(currentSession))
+                .then(r => r.json())
+                .then(data => {
+                    const isCompacting = data.is_compacting || false;
+
+                    if (isCompacting !== lastCompactingState) {
+                        lastCompactingState = isCompacting;
+                        if (isCompacting) {
+                            compactingOverlay.classList.add('active');
+                        } else {
+                            compactingOverlay.classList.remove('active');
+                        }
+                    }
+                })
+                .catch(e => console.log('Status check failed:', e))
+                .finally(() => {
+                    // Poll every 1 second for responsive overlay
+                    setTimeout(checkCompactingState, 1000);
+                });
+        }
+        checkCompactingState();
     </script>
 </body>
 </html>
@@ -2145,10 +2279,12 @@ def index():
         session_state = state.get_session(selected_session)
         pending_prompts = session_state.pending_prompts
         parsed_options = session_state.parsed_options
+        is_compacting = session_state.is_compacting
     else:
         content = ""
         pending_prompts = []
         parsed_options = []
+        is_compacting = False
 
     lines = content.strip().split('\n')[-10:] if content else []
     last_content = '\n'.join(lines)
@@ -2175,7 +2311,8 @@ def index():
         sessions=sessions_info,
         all_pending=state.get_all_pending(),
         notifications_paused=state.notifications_paused,
-        notification_mode=state.notification_mode
+        notification_mode=state.notification_mode,
+        is_compacting=is_compacting
     )
 
 @app.route('/terminal')
@@ -2313,11 +2450,13 @@ def api_status():
         pending_count = len(session_state.pending_prompts)
         options = session_state.parsed_options
         last_time = session_state.last_prompt_time.isoformat() if session_state.last_prompt_time else None
+        is_compacting = session_state.is_compacting
     else:
         is_prompt, context, prompt_type, signature = False, None, None, None
         pending_count = 0
         options = []
         last_time = None
+        is_compacting = False
 
     return jsonify({
         'waiting': is_prompt,
@@ -2326,6 +2465,7 @@ def api_status():
         'context': context,
         'options': options,
         'last_prompt_time': last_time,
+        'is_compacting': is_compacting,
         'session': session,
         'sessions': sessions,
         'backend': backend.name,
