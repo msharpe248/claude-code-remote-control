@@ -5,9 +5,8 @@ __pycache__/
 *.pyo
 .Python
 
-# Config with secrets (use config.yaml.example for template)
-# Uncomment if you want to keep secrets out of git:
-# config.yaml
+# Config with secrets (copy config.yaml.example to config.yaml)
+config.yaml
 
 # OS
 .DS_Store

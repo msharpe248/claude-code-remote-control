@@ -34,11 +34,11 @@ auth:
 
   # Basic auth credentials (when method: "basic")
   username: "claude"
-  password: "9OESLrExg53n"  # <-- The install script replaces this!
+  password: "changeme"  # <-- Change this or run install.sh to generate!
 
   # Token for URL-based auth (when method: "token")
   # Access via: http://<ip>:8765/?token=<this-value>
-  token: "aeafdb75f67d5a0960ad1112e4b3ae10"  # <-- The install script replaces this!
+  token: "your-secret-token-here"  # <-- Change this or run install.sh to generate!
 
 # ----------------------------------------------------------------------------
 # NOTIFICATIONS
@@ -73,7 +73,7 @@ notifications:
     # Anyone who knows your topic can send you notifications.
     # Bad:  "claude" (too common)
     # Good: "claude-msharpe" or "myproject-abc123"
-    topic_prefix: "cc-mlws"
+    topic_prefix: "claude-yourname"
 
     # Notification priority: min, low, default, high, max
     priority: "high"
