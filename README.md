@@ -22,16 +22,24 @@ Control Claude Code from your phone. Get push notifications with action buttons 
 
 - **Multiple Backends** - Works with tmux sessions OR Ghostty terminal (macOS)
 - **Multi-Session Support** - Automatically watches ALL sessions, separate notifications per session
-- **Push Notifications** - Get notified when any Claude session needs input
+- **Push Notifications** - Get notified when any Claude session needs input (ntfy.sh or Pushover)
+- **Notification Modes** - Active (immediate), Standby (start paused), or Log-only (testing)
 - **Smart Prompt Detection** - Detects questions, confirmations, and idle states
+- **Idle Prompt Actions** - Shows default text with "Send" button when Claude suggests a command
 - **Session Tabs** - Switch between sessions in the web UI, badges show pending counts
-- **Embedded xterm.js Terminal** - Full terminal in your browser, no separate process
+- **Embedded Terminal** - Full terminal in your browser (xterm.js for tmux, polling for Ghostty)
 - **Mobile-Friendly Control Panel** - Quick buttons for common responses
+- **Pause Toggle** - Pause notifications from the web UI when actively working
 - **Single Port** - Everything runs on one port (8765), no ttyd needed
 
 ## Quick Start
 
 ```bash
+# Clone and setup
+git clone https://github.com/msharpe248/claude-code-remote-control.git
+cd claude-code-remote-control
+cp config.yaml.example config.yaml
+
 # Install dependencies
 ./install.sh
 
@@ -107,6 +115,16 @@ terminal_backend:
   prefer: "auto"
 ```
 
+### Notification Mode
+
+```yaml
+notifications:
+  # active:   Send notifications immediately when prompts detected
+  # standby:  Start paused, toggle on in web UI when needed
+  # log_only: Log notifications but don't send (for testing)
+  mode: "active"
+```
+
 ### Notifications (ntfy)
 
 ```yaml
@@ -171,10 +189,9 @@ terminal:
 - Link to full terminal
 
 ### Terminal (`/terminal`)
-- Full xterm.js terminal
-- WebSocket connection to selected tmux session
+- **tmux**: Full xterm.js terminal with WebSocket, resize support
+- **Ghostty**: Polling-based view with command input bar
 - Auto-reconnect
-- Resize support
 
 ### API
 All endpoints accept `?session=<name>` to target a specific session.
@@ -241,14 +258,16 @@ tmux new-session -d -s personal
 
 ```
 remotecontrol/
-├── config.yaml     # Configuration
-├── server.py       # Flask server + WebSocket terminal + watcher
-├── claude-remote   # Wrapper script
-├── start.sh        # Startup script
-├── install.sh      # Installation
-├── uninstall.sh    # Cleanup
+├── config.yaml.example  # Configuration template (copy to config.yaml)
+├── config.yaml          # Your config (git-ignored, contains secrets)
+├── server.py            # Flask server + WebSocket terminal + watcher
+├── ghostty_reader.py    # Ghostty accessibility API helper
+├── claude-remote        # Wrapper script for session naming
+├── start.sh             # Startup script
+├── install.sh           # Installation
+├── uninstall.sh         # Cleanup
 ├── README.md
-└── venv/
+└── venv/                # Python virtual environment
 ```
 
 ## License
