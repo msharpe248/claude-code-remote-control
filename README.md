@@ -211,7 +211,6 @@ All endpoints accept `?session=<name>` to target a specific session.
 - `GET /` - Control panel (defaults to active session)
 - `GET /terminal` - Full terminal for selected session
 - `GET /hooks` - Hook events viewer
-- `GET /history` - Event history
 - `GET /api/status` - JSON status
 - `GET /api/hooks` - Hook events as JSON
 - `POST /api/hook` - Receive hook events (used by notify.sh)

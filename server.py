@@ -1849,11 +1849,45 @@ MAIN_TEMPLATE = """
             display: flex;
             justify-content: space-between;
             align-items: center;
+            gap: 0.5rem;
             margin-top: 0.75rem;
             padding-top: 0.5rem;
             border-top: 1px solid rgba(255,255,255,0.1);
             font-size: 0.7rem;
             color: #666;
+        }
+        .permission-meta span:first-child {
+            flex: 1;
+        }
+        .permission-meta-btn {
+            padding: 0.3rem 0.6rem;
+            border: 1px solid rgba(255,255,255,0.2);
+            border-radius: 4px;
+            background: rgba(255,255,255,0.05);
+            color: #888;
+            font-size: 0.7rem;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .permission-meta-btn:hover {
+            background: rgba(255,255,255,0.1);
+            color: #fff;
+            border-color: rgba(255,255,255,0.3);
+        }
+        .permission-meta-btn.cancel:hover {
+            background: rgba(239, 68, 68, 0.2);
+            border-color: rgba(239, 68, 68, 0.4);
+            color: #f87171;
+        }
+        .permission-add-link {
+            font-size: 0.7rem;
+            color: #888;
+            text-decoration: none;
+            margin-left: auto;
+        }
+        .permission-add-link:hover {
+            color: #22c55e;
+            text-decoration: underline;
         }
 
         /* Idle/Ready Panel - shown when Claude is waiting for new instructions */
@@ -1945,7 +1979,6 @@ MAIN_TEMPLATE = """
         <nav class="nav-links">
             <a href="/" class="active">Control</a>
             <a href="/terminal?session={{ session }}">Terminal</a>
-            <a href="/history">History</a>
             <a href="/hooks">Hooks</a>
         </nav>
 
@@ -2001,32 +2034,33 @@ MAIN_TEMPLATE = """
                 <button class="permission-btn yes" onclick="handlePermission('yes')">
                     <span class="permission-btn-num">1</span>
                     <span class="permission-btn-text">Yes</span>
-                    <span class="permission-btn-hint">Tab to add instructions</span>
+                    <a href="#" class="permission-add-link" onclick="event.stopPropagation(); showPermissionInput('yes'); return false;">+ add instructions</a>
+                </button>
+                <button class="permission-btn yes-all" onclick="handlePermission('yes-all')">
+                    <span class="permission-btn-num">2</span>
+                    <span class="permission-btn-text">Yes, allow all this session</span>
+                    <a href="#" class="permission-add-link" onclick="event.stopPropagation(); showPermissionInput('yes-all'); return false;">+ add instructions</a>
+                </button>
+                <button class="permission-btn no" onclick="handlePermission('no')">
+                    <span class="permission-btn-num">3</span>
+                    <span class="permission-btn-text">No</span>
+                    <a href="#" class="permission-add-link" onclick="event.stopPropagation(); showPermissionInput('no'); return false;">+ add instructions</a>
                 </button>
                 <div id="permission-extra-input" class="permission-extra-input">
                     <input type="text" id="permission-extra-text" placeholder="Additional instructions for Claude...">
                     <button onclick="sendPermissionWithText()">Send</button>
                 </div>
-                <button class="permission-btn yes-all" onclick="handlePermission('yes-all')">
-                    <span class="permission-btn-num">2</span>
-                    <span class="permission-btn-text">Yes, allow all this session</span>
-                    <span class="permission-btn-hint">shift+tab</span>
-                </button>
-                <button class="permission-btn no" onclick="handlePermission('no')">
-                    <span class="permission-btn-num">3</span>
-                    <span class="permission-btn-text">No</span>
-                </button>
             </div>
             <div class="permission-meta">
                 <span>Via Hook Event</span>
-                <button class="hook-question-escape" onclick="cancelPermission()">
+                <button class="permission-meta-btn cancel" onclick="cancelPermission()">
                     <span>⎋</span> Cancel
                 </button>
             </div>
         </div>
 
-        <!-- Debug Panel - Shows received hook events -->
-        <div id="debug-panel" style="background: #2a2a4a; border: 1px solid #666; border-radius: 8px; padding: 10px; margin: 10px 0; font-size: 12px; max-height: 150px; overflow-y: auto;">
+        <!-- Debug Panel - Hidden by default, enable via browser console: document.getElementById('debug-panel').style.display='block' -->
+        <div id="debug-panel" style="display: none; background: #2a2a4a; border: 1px solid #666; border-radius: 8px; padding: 10px; margin: 10px 0; font-size: 12px; max-height: 150px; overflow-y: auto;">
             <strong style="color: #aaa;">Hook Events Debug:</strong>
             <div id="debug-events" style="color: #8f8; font-family: monospace; white-space: pre-wrap;"></div>
         </div>
@@ -2381,34 +2415,34 @@ MAIN_TEMPLATE = """
 
         function handlePermission(action) {
             if (action === 'yes') {
-                // Toggle the extra input area instead of sending immediately
-                const extraInput = document.getElementById('permission-extra-input');
-                if (!extraInput.classList.contains('active')) {
-                    extraInput.classList.add('active');
-                    document.getElementById('permission-extra-text').focus();
-                    return;
-                }
-                // If already active and user clicks Yes again, just send yes
                 sendInput('y');
             } else if (action === 'yes-all') {
-                sendInput('2');
+                sendInput('!');  // Send ! for "allow all session"
             } else if (action === 'no') {
                 sendInput('n');
             }
             hidePermissionPanel();
         }
 
+        let pendingPermissionAction = 'yes';  // Track which action to send with instructions
+
+        function showPermissionInput(action) {
+            pendingPermissionAction = action;
+            const extraInput = document.getElementById('permission-extra-input');
+            extraInput.classList.add('active');
+            document.getElementById('permission-extra-text').focus();
+        }
+
         function sendPermissionWithText() {
             const extraText = document.getElementById('permission-extra-text').value.trim();
+            const action = pendingPermissionAction;
+
             if (extraText) {
                 // Send Tab first to enable text input mode, then the text
-                // Actually, we need to send "1" + text after Tab was pressed
-                // The terminal expects: Tab (to switch mode), then type text, then Enter
-                // Since we can't simulate Tab easily, we send the text with "1" prefix
                 fetch('/send', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({input: '\t', session: currentSession})
+                    body: JSON.stringify({input: '\\t', session: currentSession})
                 }).then(() => {
                     // Small delay then send the actual text
                     setTimeout(() => {
@@ -2424,9 +2458,8 @@ MAIN_TEMPLATE = """
                     }, 100);
                 });
             } else {
-                // No text, just send yes
-                sendInput('y');
-                hidePermissionPanel();
+                // No text, just send the selected action
+                handlePermission(action);
             }
         }
 
@@ -2802,7 +2835,6 @@ TERMINAL_TEMPLATE = """
         <nav class="nav-links">
             <a href="/">Control</a>
             <a href="/terminal?session={{ session }}" class="active">Terminal</a>
-            <a href="/history">History</a>
             <a href="/hooks">Hooks</a>
         </nav>
     </div>
@@ -2975,79 +3007,6 @@ TERMINAL_TEMPLATE = """
 
         connect();
     </script>
-    {% endif %}
-</body>
-</html>
-"""
-
-HISTORY_TEMPLATE = """
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Prompt History</title>
-    <style>
-        body {
-            font-family: -apple-system, sans-serif;
-            background: #1a1a2e;
-            color: #eee;
-            padding: 1rem;
-            max-width: 1200px;
-            margin: 0 auto;
-        }
-        h1 { color: #ff6b6b; margin-bottom: 0.5rem; }
-        .nav-links {
-            display: flex;
-            gap: 0.5rem;
-            margin-bottom: 1rem;
-            flex-wrap: wrap;
-        }
-        .nav-links a {
-            color: #60a5fa;
-            text-decoration: none;
-            padding: 0.5rem 1rem;
-            background: #0d0d1a;
-            border-radius: 6px;
-            font-size: 0.9rem;
-        }
-        .nav-links a:hover { background: #1a1a3e; }
-        .nav-links a.active {
-            background: #6366f1;
-            color: white;
-        }
-        .prompt-item {
-            background: #0d0d1a;
-            border-radius: 8px;
-            padding: 1rem;
-            margin-bottom: 1rem;
-            border-left: 3px solid #6366f1;
-        }
-        .prompt-time { color: #888; font-size: 0.8rem; }
-        .prompt-content {
-            font-family: monospace;
-            white-space: pre-wrap;
-            margin-top: 0.5rem;
-            font-size: 0.85rem;
-        }
-    </style>
-</head>
-<body>
-    <h1>Prompt History</h1>
-    <nav class="nav-links">
-        <a href="/">Control</a>
-        <a href="/terminal">Terminal</a>
-        <a href="/history" class="active">History</a>
-        <a href="/hooks">Hooks</a>
-    </nav>
-    {% for p in history|reverse %}
-    <div class="prompt-item">
-        <div class="prompt-time">{{ p.time }}</div>
-        <div class="prompt-content">{{ p.context }}</div>
-    </div>
-    {% endfor %}
-    {% if not history %}
-    <p>No prompts recorded yet.</p>
     {% endif %}
 </body>
 </html>
@@ -3318,7 +3277,6 @@ HOOKS_TEMPLATE = """
         <nav class="nav-links">
             <a href="/">Control</a>
             <a href="/terminal">Terminal</a>
-            <a href="/history">History</a>
             <a href="/hooks" class="active">Hooks</a>
         </nav>
 
@@ -3666,9 +3624,29 @@ def index():
     if selected_session:
         session_state = state.get_session(selected_session)
         is_compacting = session_state.is_compacting
-        # Check terminal content for idle state
-        content = backend.get_content(selected_session)
-        is_idle = detect_idle_from_terminal(content)
+
+        # Determine idle state from hook events first, terminal detection as fallback
+        hook_events = state.hook_events
+        if hook_events:
+            # Find the last Stop and last PreToolUse events
+            last_stop = None
+            last_pre_tool = None
+            for event in reversed(hook_events):
+                if event.event_type == 'Stop' and last_stop is None:
+                    last_stop = event
+                if event.event_type == 'PreToolUse' and last_pre_tool is None:
+                    last_pre_tool = event
+                if last_stop and last_pre_tool:
+                    break
+
+            # Idle if last Stop is more recent than last PreToolUse
+            if last_stop:
+                if not last_pre_tool or last_stop.timestamp > last_pre_tool.timestamp:
+                    is_idle = True
+        else:
+            # No hook events yet - fall back to terminal detection
+            content = backend.get_content(selected_session)
+            is_idle = detect_idle_from_terminal(content)
 
     # Build session info for UI
     sessions_info = []
@@ -3703,14 +3681,6 @@ def terminal():
         polling_mode=polling_mode,
         backend_name=backend.name
     )
-
-@app.route('/history')
-@requires_auth
-def history():
-    # History page now shows hook events instead of terminal-parsed prompts
-    # TODO: Could add a history of hook events here if needed
-    return render_template_string(HISTORY_TEMPLATE, history=[])
-
 
 @app.route('/hooks')
 @requires_auth
