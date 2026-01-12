@@ -2131,6 +2131,36 @@ MAIN_TEMPLATE = """
             font-size: 0.75rem;
             color: #6b7280;
         }
+        /* Context percentage indicator */
+        .context-indicator {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.25rem 0.5rem;
+            background: #374151;
+            border-radius: 4px;
+            font-size: 0.8rem;
+        }
+        .context-indicator.hidden { display: none; }
+        .context-bar {
+            width: 60px;
+            height: 6px;
+            background: #1f2937;
+            border-radius: 3px;
+            overflow: hidden;
+        }
+        .context-fill {
+            height: 100%;
+            border-radius: 3px;
+            transition: width 0.3s, background 0.3s;
+        }
+        .context-fill.high { background: #22c55e; }
+        .context-fill.medium { background: #eab308; }
+        .context-fill.low { background: #ef4444; }
+        .context-text {
+            color: #9ca3af;
+            min-width: 2rem;
+        }
     </style>
 </head>
 <body>
@@ -2173,6 +2203,17 @@ MAIN_TEMPLATE = """
                 </span>
             </div>
             <span class="global-mode-hint">tap to cycle</span>
+        </div>
+
+        <!-- Context percentage indicator (only visible when context is tracked) -->
+        <div id="context-indicator" class="context-indicator{% if not initial_context_left %} hidden{% endif %}">
+            <span class="context-text" id="context-text">{{ initial_context_left if initial_context_left else '' }}%</span>
+            <div class="context-bar">
+                <div class="context-fill {% if initial_context_left and initial_context_left > 50 %}high{% elif initial_context_left and initial_context_left > 20 %}medium{% else %}low{% endif %}"
+                     id="context-fill"
+                     style="width: {{ initial_context_left if initial_context_left else 0 }}%"></div>
+            </div>
+            <span style="color: #6b7280; font-size: 0.7rem;">context left</span>
         </div>
 
         <div id="status-area">
@@ -2411,6 +2452,33 @@ MAIN_TEMPLATE = """
             return 'normal';
         }
 
+        function updateContextIndicator(contextLeft) {
+            const indicator = document.getElementById('context-indicator');
+            const textEl = document.getElementById('context-text');
+            const fillEl = document.getElementById('context-fill');
+
+            if (!indicator) return;
+
+            if (contextLeft === null || contextLeft === undefined) {
+                indicator.classList.add('hidden');
+                return;
+            }
+
+            indicator.classList.remove('hidden');
+            if (textEl) textEl.textContent = contextLeft + '%';
+            if (fillEl) {
+                fillEl.style.width = contextLeft + '%';
+                fillEl.className = 'context-fill';
+                if (contextLeft > 50) {
+                    fillEl.classList.add('high');
+                } else if (contextLeft > 20) {
+                    fillEl.classList.add('medium');
+                } else {
+                    fillEl.classList.add('low');
+                }
+            }
+        }
+
         function promptAndSendIdle() {
             userInteracting = true;
             const customText = prompt('Enter your message to Claude:');
@@ -2501,6 +2569,9 @@ MAIN_TEMPLATE = """
                     if (data.mode && data.mode !== currentMode) {
                         updateModeDisplay(data.mode);
                     }
+
+                    // Update context percentage indicator
+                    updateContextIndicator(data.context_left);
                 })
                 .catch(e => console.log('Status check failed:', e))
                 .finally(() => {
@@ -3889,11 +3960,12 @@ def index():
     is_compacting = False
     is_idle = False
     initial_mode = 'normal'
+    initial_context_left = None
     if selected_session:
         session_state = state.get_session(selected_session)
         is_compacting = session_state.is_compacting
 
-        # Detect initial mode from terminal content (strip trailing whitespace)
+        # Detect initial mode and context % from terminal content (strip trailing whitespace)
         content = backend.get_content(selected_session)
         if content:
             tail = content.rstrip()[-500:]
@@ -3901,6 +3973,10 @@ def index():
                 initial_mode = 'edits'
             elif 'plan mode on' in tail:
                 initial_mode = 'plan'
+            # Detect context percentage
+            match = re.search(r'Context left until auto-compact: (\d+)%', tail)
+            if match:
+                initial_context_left = int(match.group(1))
 
         # Determine idle state from hook events first, terminal detection as fallback
         hook_events = state.hook_events
@@ -3944,7 +4020,8 @@ def index():
         notification_mode=state.notification_mode,
         is_compacting=is_compacting,
         is_idle=is_idle,
-        initial_mode=initial_mode
+        initial_mode=initial_mode,
+        initial_context_left=initial_context_left
     )
 
 @app.route('/terminal')
@@ -4073,10 +4150,11 @@ def api_status():
 
     is_compacting = False
     mode = 'normal'
+    context_left = None
     if session:
         session_state = state.get_session(session)
         is_compacting = session_state.is_compacting
-        # Detect mode from terminal content (strip trailing whitespace first)
+        # Detect mode and context % from terminal content (strip trailing whitespace first)
         content = backend.get_content(session)
         if content:
             # Terminal content often has trailing whitespace padding
@@ -4085,13 +4163,19 @@ def api_status():
                 mode = 'edits'
             elif 'plan mode on' in tail:
                 mode = 'plan'
+            # Detect context percentage
+            import re
+            match = re.search(r'Context left until auto-compact: (\d+)%', tail)
+            if match:
+                context_left = int(match.group(1))
 
     return jsonify({
         'is_compacting': is_compacting,
         'session': session,
         'sessions': sessions,
         'backend': backend.name,
-        'mode': mode
+        'mode': mode,
+        'context_left': context_left
     })
 
 @app.route('/test-notify', methods=['GET', 'POST'])
