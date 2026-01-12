@@ -2094,6 +2094,43 @@ MAIN_TEMPLATE = """
             font-size: 0.75rem;
             color: #6b7280;
         }
+        /* Global mode indicator bar */
+        .global-mode-bar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0.5rem 1rem;
+            background: #1f2937;
+            border-radius: 8px;
+            margin-bottom: 1rem;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .global-mode-bar:hover {
+            background: #374151;
+        }
+        .global-mode-bar:active {
+            background: #4b5563;
+        }
+        .global-mode-info {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .global-mode-icon {
+            font-size: 1.2rem;
+        }
+        .global-mode-icon.plan { color: #22d3ee; }
+        .global-mode-icon.edits { color: #a78bfa; }
+        .global-mode-icon.normal { color: #6b7280; }
+        .global-mode-text {
+            font-size: 0.9rem;
+            color: #e5e7eb;
+        }
+        .global-mode-hint {
+            font-size: 0.75rem;
+            color: #6b7280;
+        }
     </style>
 </head>
 <body>
@@ -2124,6 +2161,19 @@ MAIN_TEMPLATE = """
             {% endfor %}
         </div>
         {% endif %}
+
+        <!-- Global Mode Indicator (always visible) -->
+        <div class="global-mode-bar" onclick="cycleMode()" title="Click to cycle modes (shift+tab)">
+            <div class="global-mode-info">
+                <span class="global-mode-icon {{ 'plan' if initial_mode == 'plan' else ('edits' if initial_mode == 'edits' else 'normal') }}" id="global-mode-icon">
+                    {{ '⏸' if initial_mode == 'plan' else ('▶▶' if initial_mode == 'edits' else '●') }}
+                </span>
+                <span class="global-mode-text" id="global-mode-text">
+                    {{ 'Plan mode' if initial_mode == 'plan' else ('Auto-accept edits' if initial_mode == 'edits' else 'Normal mode') }}
+                </span>
+            </div>
+            <span class="global-mode-hint">tap to cycle</span>
+        </div>
 
         <div id="status-area">
             {% if is_compacting %}
@@ -2324,22 +2374,31 @@ MAIN_TEMPLATE = """
             // Update button display
             const btnIconEl = document.getElementById('mode-btn-icon');
             const btnLabelEl = document.getElementById('mode-btn-label');
+            // Update global mode bar
+            const globalIconEl = document.getElementById('global-mode-icon');
+            const globalTextEl = document.getElementById('global-mode-text');
 
             if (mode === 'plan') {
                 if (iconEl) { iconEl.textContent = '⏸'; iconEl.className = 'mode-icon plan'; }
                 if (labelEl) labelEl.textContent = 'Plan mode on';
                 if (btnIconEl) btnIconEl.textContent = '⏸';
                 if (btnLabelEl) btnLabelEl.textContent = 'Plan Mode';
+                if (globalIconEl) { globalIconEl.textContent = '⏸'; globalIconEl.className = 'global-mode-icon plan'; }
+                if (globalTextEl) globalTextEl.textContent = 'Plan mode';
             } else if (mode === 'edits') {
                 if (iconEl) { iconEl.textContent = '▶▶'; iconEl.className = 'mode-icon edits'; }
                 if (labelEl) labelEl.textContent = 'Accept edits on';
                 if (btnIconEl) btnIconEl.textContent = '▶▶';
                 if (btnLabelEl) btnLabelEl.textContent = 'Auto-Accept';
+                if (globalIconEl) { globalIconEl.textContent = '▶▶'; globalIconEl.className = 'global-mode-icon edits'; }
+                if (globalTextEl) globalTextEl.textContent = 'Auto-accept edits';
             } else {
                 if (iconEl) { iconEl.textContent = '●'; iconEl.className = 'mode-icon normal'; }
                 if (labelEl) labelEl.textContent = 'Normal mode';
                 if (btnIconEl) btnIconEl.textContent = '⇧⇥';
                 if (btnLabelEl) btnLabelEl.textContent = 'Cycle Mode';
+                if (globalIconEl) { globalIconEl.textContent = '●'; globalIconEl.className = 'global-mode-icon normal'; }
+                if (globalTextEl) globalTextEl.textContent = 'Normal mode';
             }
         }
 
