@@ -100,13 +100,15 @@ notifications:
 # Choose how the server accesses terminal sessions.
 #
 # Supported backends:
-#   - auto:    Auto-detect (prefers Ghostty if available with Claude sessions)
-#   - tmux:    Use tmux sessions (cross-platform, requires tmux)
-#   - ghostty: Use Ghostty directly via macOS Accessibility API (macOS only)
+#   - auto:         Auto-detect (prefers accessibility backend if available)
+#   - tmux:         Use tmux sessions (cross-platform, requires tmux)
+#   - accessibility: Use macOS Accessibility API (macOS only)
+#                   Supports: Ghostty, iTerm2, Terminal.app, Kitty, Alacritty, WezTerm
+#   - ghostty:      Alias for accessibility (for backwards compatibility)
 
 terminal_backend:
-  # Backend preference: auto | tmux | ghostty
-  prefer: "ghostty"
+  # Backend preference: auto | tmux | accessibility
+  prefer: "accessibility"
 
 # ----------------------------------------------------------------------------
 # TMUX SESSION (for tmux backend)

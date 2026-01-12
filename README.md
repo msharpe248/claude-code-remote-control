@@ -8,7 +8,7 @@ Control Claude Code from your phone. Get push notifications with action buttons 
 ┌─────────────────────────────────────────────────────────┐
 │  Desktop                                                │
 │  ┌─────────────┐  ┌──────────┐  ┌──────────────────┐   │
-│  │tmux/Ghostty │─▶│ Flask +  │─▶│ xterm.js         │   │
+│  │tmux/native  │─▶│ Flask +  │─▶│ xterm.js         │   │
 │  │  terminal   │  │ WebSocket│  │ (phone browser)  │   │
 │  └──────┬──────┘  └──────────┘  └──────────────────┘   │
 │         │                                               │
@@ -22,7 +22,8 @@ Control Claude Code from your phone. Get push notifications with action buttons 
 
 ## Features
 
-- **Multiple Backends** - Works with tmux sessions OR Ghostty terminal (macOS)
+- **Multiple Backends** - Works with tmux sessions OR native terminals via macOS Accessibility API
+- **Supported Terminals** - Ghostty, iTerm2, Terminal.app, Kitty, Alacritty, WezTerm (macOS)
 - **Multi-Session Support** - Automatically watches ALL sessions, separate notifications per session
 - **Push Notifications** - Get notified when any Claude session needs input (ntfy.sh or Pushover)
 - **Notification Modes** - Active (immediate), Standby (start paused), or Log-only (testing)
@@ -31,7 +32,7 @@ Control Claude Code from your phone. Get push notifications with action buttons 
 - **Tool Permission Dialogs** - Approve/deny tool usage (Edit, Bash, Write) from your phone
 - **Idle Detection** - Shows input panel when Claude finishes and is ready for new tasks
 - **Session Tabs** - Switch between sessions in the web UI
-- **Embedded Terminal** - Full terminal in your browser (xterm.js for tmux, polling for Ghostty)
+- **Embedded Terminal** - Full terminal in your browser (xterm.js for tmux, polling for others)
 - **Hook Events Viewer** - Real-time log of all Claude Code hook events at `/hooks`
 - **Mobile-Friendly Control Panel** - Responsive UI optimized for phone browsers
 - **Pause Toggle** - Pause notifications from the web UI when actively working
@@ -62,7 +63,7 @@ Then open `http://<your-lan-ip>:8765/` on your phone.
 
 ## How It Works
 
-1. **Claude Code runs in terminal** - tmux sessions OR Ghostty tabs/panes
+1. **Claude Code runs in terminal** - tmux sessions OR native terminal tabs/panes
 2. **Hooks stream events** - Claude Code hooks send real-time events to the server
 3. **Rich UI panels** - Questions, permissions, and idle state show as interactive panels
 4. **Per-session notifications** - Each session gets its own ntfy topic
@@ -79,17 +80,28 @@ tmux new-session -d -s claude
 tmux send-keys -t claude 'claude' Enter
 ```
 
-### Ghostty (macOS only, no tmux needed!)
-Direct access to Ghostty terminal via macOS Accessibility API.
+### Accessibility Backend (macOS only, no tmux needed!)
+Direct access to terminal content via macOS Accessibility API. Supports multiple terminal applications.
+
+**Supported Terminals:**
+- Ghostty (1.2.0+)
+- iTerm2
+- Terminal.app
+- Kitty
+- Alacritty
+- WezTerm
 
 **Requirements:**
-1. Ghostty 1.2.0+ (has accessibility API support)
-2. Grant accessibility permissions to Python/terminal
+1. Grant accessibility permissions to Python/terminal
+2. Terminal must expose text content via accessibility API
 
 **Setup:**
 1. Open System Settings > Privacy & Security > Accessibility
-2. Add Terminal.app (or your terminal) to the allowed list
-3. Run Claude Code in any Ghostty tab/pane - no tmux needed!
+2. Add your terminal app (Terminal.app, iTerm2, etc.) to the allowed list
+3. Run Claude Code in any terminal tab/pane - no tmux needed!
+
+**Auto-Detection:**
+The server automatically detects which supported terminal is running and connects to it.
 
 ## Notification Actions
 
@@ -116,9 +128,9 @@ Edit `config.yaml`:
 
 ```yaml
 terminal_backend:
-  # auto: prefer Ghostty if available, fall back to tmux
+  # auto: prefer accessibility backend if available, fall back to tmux
   # tmux: always use tmux
-  # ghostty: always use Ghostty (macOS only)
+  # accessibility: use accessibility backend (macOS only, auto-detects terminal)
   prefer: "auto"
 ```
 
@@ -196,7 +208,7 @@ terminal:
 
 ### Terminal (`/terminal`)
 - **tmux**: Full xterm.js terminal with WebSocket, resize support
-- **Ghostty**: Polling-based view with command input bar
+- **Accessibility backend**: Polling-based view with command input bar
 - Auto-reconnect
 
 ### Hook Events (`/hooks`)

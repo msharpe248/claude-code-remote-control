@@ -5,7 +5,7 @@ Provides web interface, embedded terminal, and notifications for remote prompt a
 
 Supports multiple terminal backends:
 - tmux: Traditional tmux sessions (default, cross-platform)
-- ghostty: Direct Ghostty access via macOS Accessibility API (macOS only)
+- accessibility: macOS Accessibility API (supports Ghostty, iTerm2, Terminal.app, Kitty, Alacritty, WezTerm)
 """
 
 import os
@@ -35,7 +35,7 @@ from typing import Optional, List, Dict, Any
 from flask import Flask, request, Response, render_template_string, jsonify, redirect, url_for
 from flask_sock import Sock
 
-# Optional: Ghostty backend (macOS only)
+# Optional: Accessibility backend (macOS only)
 try:
     from ApplicationServices import (
         AXUIElementCopyAttributeValue,
@@ -48,9 +48,9 @@ try:
         kCGWindowListOptionOnScreenOnly,
         kCGNullWindowID,
     )
-    GHOSTTY_AVAILABLE = True
+    ACCESSIBILITY_AVAILABLE = True
 except ImportError:
-    GHOSTTY_AVAILABLE = False
+    ACCESSIBILITY_AVAILABLE = False
 
 # Load configuration
 CONFIG_PATH = Path(__file__).parent / "config.yaml"
@@ -222,8 +222,20 @@ class TmuxBackend(TerminalBackend):
         return ['tmux', 'attach-session', '-t', session]
 
 
-class GhosttyBackend(TerminalBackend):
-    """Ghostty terminal backend using macOS Accessibility API."""
+# Supported terminals for macOS Accessibility backend
+# Maps display name -> (process names to search for, AppleScript app name)
+SUPPORTED_TERMINALS = {
+    'Ghostty': (['Ghostty'], 'Ghostty'),
+    'iTerm2': (['iTerm2', 'iTerm'], 'iTerm'),
+    'Terminal': (['Terminal'], 'Terminal'),
+    'Kitty': (['kitty'], 'kitty'),
+    'Alacritty': (['Alacritty', 'alacritty'], 'Alacritty'),
+    'WezTerm': (['WezTerm', 'wezterm-gui'], 'WezTerm'),
+}
+
+
+class AccessibilityBackend(TerminalBackend):
+    """macOS Accessibility API backend - works with multiple terminal apps."""
 
     def __init__(self):
         self._pid: Optional[int] = None
@@ -231,10 +243,14 @@ class GhosttyBackend(TerminalBackend):
         self._terminals_cache: Dict[str, str] = {}
         self._last_refresh = 0
         self._refresh_interval = 1.0  # Seconds between tree refreshes
+        self._detected_terminal: Optional[str] = None  # e.g., 'Ghostty', 'iTerm2'
+        self._applescript_name: Optional[str] = None   # e.g., 'Ghostty', 'iTerm'
 
     @property
     def name(self) -> str:
-        return "ghostty"
+        if self._detected_terminal:
+            return f"accessibility ({self._detected_terminal})"
+        return "accessibility"
 
     def _get_ax_attribute(self, element, attribute):
         """Get an accessibility attribute value."""
@@ -250,21 +266,28 @@ class GhosttyBackend(TerminalBackend):
             return list(attrs) if attrs else []
         return []
 
-    def _find_ghostty_pid(self) -> Optional[int]:
-        """Find Ghostty's process ID."""
+    def _find_terminal_pid(self) -> Optional[int]:
+        """Find a supported terminal's process ID."""
         windows = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID)
-        for window in windows:
-            owner = window.get('kCGWindowOwnerName', '')
-            pid = window.get('kCGWindowOwnerPID', 0)
-            if owner == "Ghostty" and pid:
-                return pid
+
+        # Try each supported terminal
+        for terminal_name, (process_names, applescript_name) in SUPPORTED_TERMINALS.items():
+            for window in windows:
+                owner = window.get('kCGWindowOwnerName', '')
+                pid = window.get('kCGWindowOwnerPID', 0)
+                if owner in process_names and pid:
+                    self._detected_terminal = terminal_name
+                    self._applescript_name = applescript_name
+                    log.info(f"[accessibility] Detected terminal: {terminal_name} (pid={pid})")
+                    return pid
+
         return None
 
-    def _get_ghostty_app(self):
-        """Get or create accessibility element for Ghostty."""
-        # Check if we need to refresh
+    def _get_terminal_app(self):
+        """Get or create accessibility element for the detected terminal."""
+        # Check if we need to find a terminal
         if self._pid is None:
-            self._pid = self._find_ghostty_pid()
+            self._pid = self._find_terminal_pid()
             if self._pid is None:
                 return None
 
@@ -337,11 +360,11 @@ class GhosttyBackend(TerminalBackend):
 
             return processes
         except Exception as e:
-            log.error(f"[ghostty] Error getting claude processes: {e}")
+            log.error(f"[accessibility] Error getting claude processes: {e}")
             return []
 
     def _refresh_terminals(self):
-        """Refresh the terminal content cache from Ghostty."""
+        """Refresh the terminal content cache from the detected terminal."""
         now = time.time()
         if now - self._last_refresh < self._refresh_interval:
             return
@@ -354,8 +377,8 @@ class GhosttyBackend(TerminalBackend):
             self._terminals_cache = {}
             return
 
-        # Get Ghostty terminal contents
-        app = self._get_ghostty_app()
+        # Get terminal contents via accessibility API
+        app = self._get_terminal_app()
         if not app:
             self._terminals_cache = {}
             return
@@ -381,7 +404,7 @@ class GhosttyBackend(TerminalBackend):
         terminals = {}
         used_contents = set()
 
-        log.debug(f"[ghostty] Found {len(terminal_contents)} terminal panes, {len(claude_procs)} Claude processes")
+        log.debug(f"[accessibility] Found {len(terminal_contents)} terminal panes, {len(claude_procs)} Claude processes")
 
         # Sort processes so named sessions come first (they get priority for matching)
         # This ensures sessions started with `claude-remote -s <name>` get first pick
@@ -454,13 +477,13 @@ class GhosttyBackend(TerminalBackend):
                     score -= 20
                 if "Sending notification:" in recent:
                     score -= 20
-                if "[ghostty]" in recent or "[rc]" in recent:
+                if "[accessibility]" in recent or "[rc]" in recent:
                     score -= 15
                 # Timestamp patterns like "2026-01-01 01:24:24,136"
                 if re.search(r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}', recent):
                     score -= 20
 
-                log.debug(f"[ghostty] Terminal {i} score: {score} (len={len(content)})")
+                log.debug(f"[accessibility] Terminal {i} score: {score} (len={len(content)})")
                 if score > best_score:
                     best_score = score
                     matched_content = content
@@ -471,20 +494,20 @@ class GhosttyBackend(TerminalBackend):
                 if best_score >= 0:
                     used_contents.add(matched_idx)
                     terminals[session_name] = matched_content
-                    log.debug(f"[ghostty] Session '{session_name}' matched to Terminal {matched_idx} (score: {best_score})")
+                    log.debug(f"[accessibility] Session '{session_name}' matched to Terminal {matched_idx} (score: {best_score})")
                 else:
                     # Negative score means it's likely NOT a Claude terminal
                     # Don't use it - better to have no content than wrong content
-                    log.debug(f"[ghostty] Rejecting match for '{session_name}' - Terminal {matched_idx} (score: {best_score})")
+                    log.debug(f"[accessibility] Rejecting match for '{session_name}' - Terminal {matched_idx} (score: {best_score})")
                     terminals[session_name] = ""
 
         self._terminals_cache = terminals
 
     def is_available(self) -> bool:
-        """Check if Ghostty is available."""
-        if not GHOSTTY_AVAILABLE:
+        """Check if a supported terminal with accessibility access is available."""
+        if not ACCESSIBILITY_AVAILABLE:
             return False
-        pid = self._find_ghostty_pid()
+        pid = self._find_terminal_pid()
         if not pid:
             return False
         # Try to access it
@@ -501,19 +524,24 @@ class GhosttyBackend(TerminalBackend):
         """Get terminal content for a session."""
         self._refresh_terminals()
         content = self._terminals_cache.get(session, "")
-        log.debug(f"[ghostty] get_content('{session}'): cache keys={list(self._terminals_cache.keys())}, content_len={len(content)}")
+        log.debug(f"[accessibility] get_content('{session}'): cache keys={list(self._terminals_cache.keys())}, content_len={len(content)}")
         return content
 
     def send_keys(self, session: str, keys: str) -> bool:
         """
-        Send keystrokes to Ghostty.
+        Send keystrokes to the detected terminal.
 
-        Note: The macOS Accessibility API is read-only for Ghostty.
-        We use clipboard paste for reliability (keystroke can drop characters).
+        Note: The macOS Accessibility API is read-only.
+        We use AppleScript to send keystrokes to the terminal.
         """
+        if not self._applescript_name:
+            log.error("[accessibility] No terminal detected, cannot send keys")
+            return False
+
+        app_name = self._applescript_name
         try:
-            # First, try to activate Ghostty with a short timeout
-            activate_script = 'tell application "Ghostty" to activate'
+            # First, try to activate the terminal with a short timeout
+            activate_script = f'tell application "{app_name}" to activate'
             try:
                 subprocess.run(
                     ['osascript', '-e', activate_script],
@@ -522,14 +550,14 @@ class GhosttyBackend(TerminalBackend):
                     timeout=3
                 )
             except subprocess.TimeoutExpired:
-                log.warning("[ghostty] Activate timed out, trying to send keys anyway")
+                log.warning("[accessibility] Activate timed out, trying to send keys anyway")
 
             if keys:
                 # Escape special characters for AppleScript string
                 escaped_keys = keys.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
 
                 script = f'''
-                tell application "Ghostty" to activate
+                tell application "{app_name}" to activate
                 delay 0.2
                 tell application "System Events"
                     keystroke "{escaped_keys}"
@@ -539,9 +567,10 @@ class GhosttyBackend(TerminalBackend):
                 '''
             else:
                 # Just Enter
-                script = '''
+                process_name = app_name.lower()
+                script = f'''
                 tell application "System Events"
-                    tell process "ghostty"
+                    tell process "{process_name}"
                         key code 36
                     end tell
                 end tell
@@ -554,21 +583,26 @@ class GhosttyBackend(TerminalBackend):
                 timeout=5
             )
             if result.returncode != 0:
-                log.error(f"[ghostty] AppleScript error: {result.stderr}")
+                log.error(f"[accessibility] AppleScript error: {result.stderr}")
                 return False
             return True
         except subprocess.TimeoutExpired:
-            log.error("[ghostty] AppleScript timed out sending keys")
+            log.error("[accessibility] AppleScript timed out sending keys")
             return False
         except Exception as e:
-            log.error(f"[ghostty] Error sending keys: {e}")
+            log.error(f"[accessibility] Error sending keys: {e}")
             return False
 
     def send_esc(self, session: str) -> bool:
-        """Send Escape key to Ghostty."""
+        """Send Escape key to the detected terminal."""
+        if not self._applescript_name:
+            log.error("[accessibility] No terminal detected, cannot send Esc")
+            return False
+
+        app_name = self._applescript_name
         try:
-            script = '''
-            tell application "Ghostty" to activate
+            script = f'''
+            tell application "{app_name}" to activate
             delay 0.2
             tell application "System Events"
                 key code 53
@@ -581,24 +615,24 @@ class GhosttyBackend(TerminalBackend):
                 timeout=5
             )
             if result.returncode != 0:
-                log.error(f"[ghostty] AppleScript error: {result.stderr}")
+                log.error(f"[accessibility] AppleScript error: {result.stderr}")
                 return False
             return True
         except subprocess.TimeoutExpired:
-            log.error("[ghostty] AppleScript timed out sending Esc")
+            log.error("[accessibility] AppleScript timed out sending Esc")
             return False
         except Exception as e:
-            log.error(f"[ghostty] Error sending Esc: {e}")
+            log.error(f"[accessibility] Error sending Esc: {e}")
             return False
 
     def supports_terminal_attach(self) -> bool:
-        # Ghostty doesn't support attaching like tmux
+        # Accessibility backend doesn't support attaching like tmux
         return False
 
 
 # Initialize backends
 _tmux_backend = TmuxBackend()
-_ghostty_backend = GhosttyBackend() if GHOSTTY_AVAILABLE else None
+_accessibility_backend = AccessibilityBackend() if ACCESSIBILITY_AVAILABLE else None
 
 def get_active_backend() -> TerminalBackend:
     """Get the currently active terminal backend based on config and availability."""
@@ -609,23 +643,23 @@ def get_active_backend() -> TerminalBackend:
             return _tmux_backend
         log.warning("[backend] tmux preferred but not available")
 
-    elif backend_pref == 'ghostty':
-        if _ghostty_backend and _ghostty_backend.is_available():
-            return _ghostty_backend
-        log.warning("[backend] ghostty preferred but not available")
+    elif backend_pref in ('ghostty', 'accessibility'):
+        if _accessibility_backend and _accessibility_backend.is_available():
+            return _accessibility_backend
+        log.warning("[backend] accessibility preferred but not available")
 
-    # Auto-detect: prefer Ghostty if available (no tmux needed), fall back to tmux
+    # Auto-detect: prefer accessibility if available (no tmux needed), fall back to tmux
     if backend_pref == 'auto':
-        # Check if Ghostty has Claude sessions
-        if _ghostty_backend and _ghostty_backend.is_available():
-            sessions = _ghostty_backend.get_sessions()
+        # Check if accessibility backend has Claude sessions
+        if _accessibility_backend and _accessibility_backend.is_available():
+            sessions = _accessibility_backend.get_sessions()
             if sessions:
                 # Check if any session has Claude content
                 for s in sessions:
-                    content = _ghostty_backend.get_content(s)
+                    content = _accessibility_backend.get_content(s)
                     if content and ("claude" in content.lower()[-2000:] or
                                    "? for shortcuts" in content[-1000:]):
-                        return _ghostty_backend
+                        return _accessibility_backend
 
         # Fall back to tmux
         if _tmux_backend.is_available():
@@ -634,8 +668,8 @@ def get_active_backend() -> TerminalBackend:
     # Last resort
     if _tmux_backend.is_available():
         return _tmux_backend
-    if _ghostty_backend and _ghostty_backend.is_available():
-        return _ghostty_backend
+    if _accessibility_backend and _accessibility_backend.is_available():
+        return _accessibility_backend
 
     log.error("[backend] No terminal backend available!")
     return _tmux_backend  # Return tmux as fallback even if not available
@@ -987,7 +1021,7 @@ def watcher_loop():
 
     while True:
         try:
-            # Re-check backend periodically (in case Ghostty starts/stops)
+            # Re-check backend periodically (in case terminals start/stop)
             backend = get_active_backend()
 
             # Get all active sessions from current backend
@@ -1047,7 +1081,7 @@ def terminal_websocket(ws):
 
     session = request.args.get('session') or state.active_session or config['tmux']['session_name']
 
-    # For backends that don't support PTY attachment (like Ghostty),
+    # For backends that don't support PTY attachment (like the accessibility backend),
     # use a polling approach: read content periodically and send input via send_keys
     if not backend.supports_terminal_attach():
         ws.send(f"\r\n  [{backend.name}] Polling mode - content updates every 1s\r\n")
@@ -2861,7 +2895,7 @@ TERMINAL_TEMPLATE = """
 
     {% if polling_mode %}
     <script>
-        // Polling mode for Ghostty - simple fetch-based content updates
+        // Polling mode for accessibility backend - simple fetch-based content updates
         const output = document.getElementById('terminal-output');
         const statusEl = document.getElementById('ws-status');
 
@@ -3961,7 +3995,7 @@ def main():
     ntfy_prefix = config['notifications']['ntfy'].get('topic_prefix', 'claude-remote')
 
     # Check backend availability
-    ghostty_status = "available" if (_ghostty_backend and _ghostty_backend.is_available()) else "not available"
+    accessibility_status = "available" if (_accessibility_backend and _accessibility_backend.is_available()) else "not available"
     tmux_status = "available" if _tmux_backend.is_available() else "not available"
 
     print(f"""
@@ -3975,7 +4009,7 @@ def main():
 ║  Backend:       {backend.name}
 ║  ntfy prefix:   {ntfy_prefix}-<session>
 ╠═══════════════════════════════════════════════════════════╣
-║  Backends:  tmux: {tmux_status:<12}  ghostty: {ghostty_status:<12}  ║
+║  Backends:  tmux: {tmux_status:<12}  a11y: {accessibility_status:<15}  ║
 ║  Hooks:     Run ./hooks/install.sh to configure             ║
 ╚═══════════════════════════════════════════════════════════╝
     """)
@@ -3986,8 +4020,9 @@ def main():
         print(f"[{backend.name}] No sessions found!")
         if backend.name == 'tmux':
             print("          Create with: tmux new-session -d -s <name>")
-        else:
-            print("          Open Ghostty and run Claude Code")
+        elif 'accessibility' in backend.name:
+            detected = _accessibility_backend._detected_terminal if _accessibility_backend else 'a terminal'
+            print(f"          Open {detected} and run Claude Code")
 
     watcher_thread = threading.Thread(target=watcher_loop, daemon=True)
     watcher_thread.start()
