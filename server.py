@@ -2742,34 +2742,6 @@ MAIN_TEMPLATE = """
         // Tool Permission UI
         // ============================================================
 
-        function parsePermissionOptions(content) {
-            // Parse options like "1. Yes", "2. No", "❯ 1. Yes" from terminal content
-            // Look for the pattern in the last part of the content
-            const tail = content ? content.trimEnd().slice(-1000) : '';
-            const options = [];
-
-            // Match lines like "1. Yes", "  2. No", "❯ 1. Yes"
-            // The pattern: optional cursor (❯), optional spaces, digit, dot, space, text
-            const regex = /^[❯\\s]*(\\d+)\\.\\s+(.+)$/gm;
-            let match;
-            while ((match = regex.exec(tail)) !== null) {
-                const num = match[1];
-                const text = match[2].trim();
-                // Skip if it looks like a list item in content rather than an option
-                // Allow up to 100 chars for longer options like "Yes, allow all edits during this session (shift+tab)"
-                if (text && !text.includes(':') && text.length < 100) {
-                    options.push({ num: num, text: text });
-                }
-            }
-
-            // Dedupe by number (keep last occurrence)
-            const seen = new Map();
-            for (const opt of options) {
-                seen.set(opt.num, opt);
-            }
-            return Array.from(seen.values()).sort((a, b) => parseInt(a.num) - parseInt(b.num));
-        }
-
         function buildPermissionButtons(options) {
             const container = document.getElementById('permission-options');
             if (!container) return;
@@ -2838,19 +2810,14 @@ MAIN_TEMPLATE = """
             document.getElementById('permission-extra-input').classList.remove('active');
             document.getElementById('permission-extra-text').value = '';
 
-            // Fetch terminal content and parse options
-            fetch('/api/content?session=' + encodeURIComponent(currentSession))
-                .then(r => r.json())
-                .then(data => {
-                    const options = parsePermissionOptions(data.content);
-                    debugLog('Parsed ' + options.length + ' options: ' + JSON.stringify(options));
-                    buildPermissionButtons(options);
-                })
-                .catch(err => {
-                    debugLog('Failed to fetch content for options: ' + err);
-                    // Fallback to default options
-                    buildPermissionButtons([]);
-                });
+            // Use standard permission options - Claude always shows these same 3 options
+            // Don't parse terminal content as it contains conversation history with numbered lists
+            const standardOptions = [
+                { num: '1', text: 'Yes' },
+                { num: '2', text: "Yes, don't ask again" },
+                { num: '3', text: 'No' }
+            ];
+            buildPermissionButtons(standardOptions);
 
             panel.classList.add('active');
         }
