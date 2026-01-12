@@ -2306,7 +2306,8 @@ MAIN_TEMPLATE = """
             }).then(r => r.json()).then(d => {
                 if(d.success) {
                     // Cycle through modes optimistically while waiting for terminal update
-                    const modes = ['normal', 'plan', 'edits'];
+                    // Claude's order: normal → edits → plan → normal
+                    const modes = ['normal', 'edits', 'plan'];
                     const nextIndex = (modes.indexOf(currentMode) + 1) % modes.length;
                     updateModeDisplay(modes[nextIndex]);
                 } else {
