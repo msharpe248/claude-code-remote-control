@@ -2703,13 +2703,14 @@ MAIN_TEMPLATE = """
 
             // Match lines like "1. Yes", "  2. No", "❯ 1. Yes"
             // The pattern: optional cursor (❯), optional spaces, digit, dot, space, text
-            const regex = /^[❯\s]*(\d+)\.\s+(.+?)$/gm;
+            const regex = /^[❯\s]*(\d+)\.\s+(.+)$/gm;
             let match;
             while ((match = regex.exec(tail)) !== null) {
                 const num = match[1];
                 const text = match[2].trim();
                 // Skip if it looks like a list item in content rather than an option
-                if (text && !text.includes(':') && text.length < 50) {
+                // Allow up to 100 chars for longer options like "Yes, allow all edits during this session (shift+tab)"
+                if (text && !text.includes(':') && text.length < 100) {
                     options.push({ num: num, text: text });
                 }
             }
