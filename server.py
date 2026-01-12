@@ -2345,10 +2345,10 @@ MAIN_TEMPLATE = """
 
         function detectModeFromContent(content) {
             if (!content) return 'normal';
-            // Check last 500 chars for mode indicators (using actual Unicode chars)
-            const tail = content.slice(-500);
-            if (tail.includes('⏵⏵ accept edits on')) return 'edits';
-            if (tail.includes('⏸ plan mode on')) return 'plan';
+            // Strip trailing whitespace, then check last 500 chars for mode indicators
+            const tail = content.trimEnd().slice(-500);
+            if (tail.includes('accept edits on')) return 'edits';
+            if (tail.includes('plan mode on')) return 'plan';
             return 'normal';
         }
 
@@ -3834,13 +3834,13 @@ def index():
         session_state = state.get_session(selected_session)
         is_compacting = session_state.is_compacting
 
-        # Detect initial mode from terminal content
+        # Detect initial mode from terminal content (strip trailing whitespace)
         content = backend.get_content(selected_session)
         if content:
-            tail = content[-500:]
-            if '⏵⏵ accept edits on' in tail:
+            tail = content.rstrip()[-500:]
+            if 'accept edits on' in tail:
                 initial_mode = 'edits'
-            elif '⏸ plan mode on' in tail:
+            elif 'plan mode on' in tail:
                 initial_mode = 'plan'
 
         # Determine idle state from hook events first, terminal detection as fallback
@@ -4017,13 +4017,14 @@ def api_status():
     if session:
         session_state = state.get_session(session)
         is_compacting = session_state.is_compacting
-        # Detect mode from terminal content
+        # Detect mode from terminal content (strip trailing whitespace first)
         content = backend.get_content(session)
         if content:
-            tail = content[-500:]
-            if '⏵⏵ accept edits on' in tail:
+            # Terminal content often has trailing whitespace padding
+            tail = content.rstrip()[-500:]
+            if 'accept edits on' in tail:
                 mode = 'edits'
-            elif '⏸ plan mode on' in tail:
+            elif 'plan mode on' in tail:
                 mode = 'plan'
 
     return jsonify({
