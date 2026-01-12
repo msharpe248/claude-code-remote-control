@@ -754,6 +754,7 @@ class HookEvent:
             'tool_result': self.tool_result[:500] if self.tool_result and len(self.tool_result) > 500 else self.tool_result,
             'reason': self.reason,
             'permission_mode': self.permission_mode,
+            'raw_data': self.raw_data,
         }
 
 
@@ -3879,8 +3880,19 @@ HOOKS_TEMPLATE = """
         function renderEvents() {
             const tbody = document.getElementById('eventsBody');
             // First filter by session if sessionFilter is set
+            // Note: sessionFilter from URL could be TTY (ttys003) or session_id (UUID)
+            // We check both the tty field in raw_data and session_id
             let sessionFiltered = sessionFilter
-                ? events.filter(e => e.session_id && e.session_id.includes(sessionFilter))
+                ? events.filter(e => {
+                    // Check if it matches TTY (normalize both for comparison)
+                    const eventTty = e.raw_data?.tty || '';
+                    const normalizedFilter = sessionFilter.startsWith('tty') ? sessionFilter.slice(3) : sessionFilter;
+                    const normalizedTty = eventTty.startsWith('tty') ? eventTty.slice(3) : eventTty;
+                    if (normalizedTty && normalizedTty === normalizedFilter) return true;
+                    // Also check session_id for backward compatibility
+                    if (e.session_id && e.session_id.includes(sessionFilter)) return true;
+                    return false;
+                })
                 : events;
             // Then filter by event type
             const filtered = activeFilter === 'all'
@@ -4374,7 +4386,7 @@ SESSIONS_TEMPLATE = """
                             <div class="session-actions">
                                 ${hookStatus !== 'none' ? `<button class="action-btn control-btn" onclick="goToControl('${escapeHtml(s.tty)}')">Control</button>` : ''}
                                 <button class="action-btn terminal-btn" onclick="goToTerminal('${escapeHtml(s.tty)}')">Terminal</button>
-                                ${hookStatus !== 'none' ? `<button class="action-btn hooks-btn" onclick="goToHooks()">Hooks</button>` : ''}
+                                ${hookStatus !== 'none' ? `<button class="action-btn hooks-btn" onclick="goToHooks('${escapeHtml(s.tty)}')">Hooks</button>` : ''}
                                 ${isHooked ? `<button class="action-btn rename-btn" onclick="showRenameForm('${escapeHtml(s.session_id)}')">Rename</button>` : ''}
                                 ${isHooked ? `<button class="action-btn delete-btn" onclick="deleteSession('${escapeHtml(s.session_id)}')">Remove</button>` : ''}
                             </div>
@@ -4415,8 +4427,8 @@ SESSIONS_TEMPLATE = """
             window.location.href = '/terminal?session=' + encodeURIComponent(tty);
         }
 
-        function goToHooks() {
-            window.location.href = '/hooks';
+        function goToHooks(tty) {
+            window.location.href = '/hooks?session=' + encodeURIComponent(tty);
         }
 
         function showInstallHooks(cwd) {
