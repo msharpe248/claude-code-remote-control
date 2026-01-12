@@ -2299,11 +2299,16 @@ MAIN_TEMPLATE = """
         let currentMode = 'normal';  // 'normal', 'plan', 'edits'
 
         function cycleMode() {
+            console.log('cycleMode called, session:', currentSession);
             fetch('/send-shift-tab', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({session: currentSession})
-            }).then(r => r.json()).then(d => {
+            }).then(r => {
+                console.log('Response status:', r.status);
+                return r.json();
+            }).then(d => {
+                console.log('Response data:', d);
                 if(d.success) {
                     // Cycle through modes optimistically while waiting for terminal update
                     // Claude's order: normal → edits → plan → normal
@@ -2313,6 +2318,9 @@ MAIN_TEMPLATE = """
                 } else {
                     alert('Error: ' + d.error);
                 }
+            }).catch(err => {
+                console.error('cycleMode error:', err);
+                alert('Network error: ' + err.message);
             });
         }
 
