@@ -2253,32 +2253,15 @@ MAIN_TEMPLATE = """
                 <span class="permission-title">Permission required for <span id="permission-tool" class="permission-tool"></span></span>
             </div>
             <div id="permission-detail" class="permission-detail"></div>
-            <div class="permission-options">
-                <button class="permission-btn yes" onclick="handlePermission('yes')">
-                    <span class="permission-btn-num">1</span>
-                    <span class="permission-btn-text">Yes</span>
-                    <a href="#" class="permission-add-link" onclick="event.stopPropagation(); showPermissionInput('yes'); return false;">+ add instructions</a>
-                </button>
-                <button class="permission-btn yes-all" onclick="handlePermission('yes-all')">
-                    <span class="permission-btn-num">2</span>
-                    <span class="permission-btn-text">Yes, allow all this session</span>
-                    <a href="#" class="permission-add-link" onclick="event.stopPropagation(); showPermissionInput('yes-all'); return false;">+ add instructions</a>
-                </button>
-                <button class="permission-btn no" onclick="handlePermission('no')">
-                    <span class="permission-btn-num">3</span>
-                    <span class="permission-btn-text">No</span>
-                    <a href="#" class="permission-add-link" onclick="event.stopPropagation(); showPermissionInput('no'); return false;">+ add instructions</a>
-                </button>
-                <div id="permission-extra-input" class="permission-extra-input">
-                    <input type="text" id="permission-extra-text" placeholder="Additional instructions for Claude...">
-                    <button onclick="sendPermissionWithText()">Send</button>
-                </div>
+            <div id="permission-options" class="permission-options">
+                <!-- Dynamically populated based on terminal content -->
+            </div>
+            <div id="permission-extra-input" class="permission-extra-input">
+                <input type="text" id="permission-extra-text" placeholder="Additional instructions for Claude...">
+                <button onclick="sendPermissionWithText()">Send</button>
             </div>
             <div class="permission-meta">
                 <span>Via Hook Event</span>
-                <button class="permission-meta-btn" onclick="handlePermission('yes-all')">
-                    <span>⇧⇥</span> Allow all session
-                </button>
                 <button class="permission-meta-btn cancel" onclick="cancelPermission()">
                     <span>⎋</span> Cancel
                 </button>
@@ -2712,6 +2695,77 @@ MAIN_TEMPLATE = """
         // Tool Permission UI
         // ============================================================
 
+        function parsePermissionOptions(content) {
+            // Parse options like "1. Yes", "2. No", "❯ 1. Yes" from terminal content
+            // Look for the pattern in the last part of the content
+            const tail = content ? content.trimEnd().slice(-1000) : '';
+            const options = [];
+
+            // Match lines like "1. Yes", "  2. No", "❯ 1. Yes"
+            // The pattern: optional cursor (❯), optional spaces, digit, dot, space, text
+            const regex = /^[❯\s]*(\d+)\.\s+(.+?)$/gm;
+            let match;
+            while ((match = regex.exec(tail)) !== null) {
+                const num = match[1];
+                const text = match[2].trim();
+                // Skip if it looks like a list item in content rather than an option
+                if (text && !text.includes(':') && text.length < 50) {
+                    options.push({ num: num, text: text });
+                }
+            }
+
+            // Dedupe by number (keep last occurrence)
+            const seen = new Map();
+            for (const opt of options) {
+                seen.set(opt.num, opt);
+            }
+            return Array.from(seen.values()).sort((a, b) => parseInt(a.num) - parseInt(b.num));
+        }
+
+        function buildPermissionButtons(options) {
+            const container = document.getElementById('permission-options');
+            if (!container) return;
+
+            // Clear existing buttons
+            container.innerHTML = '';
+
+            if (options.length === 0) {
+                // Fallback to default options if we couldn't parse any
+                options = [
+                    { num: '1', text: 'Yes' },
+                    { num: '2', text: 'No' }
+                ];
+            }
+
+            for (const opt of options) {
+                const btn = document.createElement('button');
+                // Determine button style based on text content
+                let btnClass = 'permission-btn';
+                const textLower = opt.text.toLowerCase();
+                if (textLower.includes('no') || textLower.includes('deny') || textLower.includes('reject')) {
+                    btnClass += ' no';
+                } else if (textLower.includes('all') || textLower.includes('session') || textLower.includes('always')) {
+                    btnClass += ' yes-all';
+                } else {
+                    btnClass += ' yes';
+                }
+                btn.className = btnClass;
+                btn.onclick = () => handlePermissionOption(opt.num);
+
+                btn.innerHTML = '<span class="permission-btn-num">' + opt.num + '</span>' +
+                    '<span class="permission-btn-text">' + escapeHtml(opt.text) + '</span>' +
+                    '<a href="#" class="permission-add-link" onclick="event.stopPropagation(); showPermissionInput(' + String.fromCharCode(39) + 'opt' + opt.num + String.fromCharCode(39) + '); return false;">+ add instructions</a>';
+
+                container.appendChild(btn);
+            }
+        }
+
+        function handlePermissionOption(num) {
+            // Send the number key to select that option
+            sendInput(num);
+            hidePermissionPanel();
+        }
+
         function showPermissionPanel(event) {
             debugLog('>>> SHOWING PERMISSION PANEL for ' + event.tool_name);
             currentPermissionEvent = event;
@@ -2736,6 +2790,20 @@ MAIN_TEMPLATE = """
             document.getElementById('permission-extra-input').classList.remove('active');
             document.getElementById('permission-extra-text').value = '';
 
+            // Fetch terminal content and parse options
+            fetch('/api/content?session=' + encodeURIComponent(currentSession))
+                .then(r => r.json())
+                .then(data => {
+                    const options = parsePermissionOptions(data.content);
+                    debugLog('Parsed ' + options.length + ' options: ' + JSON.stringify(options));
+                    buildPermissionButtons(options);
+                })
+                .catch(err => {
+                    debugLog('Failed to fetch content for options: ' + err);
+                    // Fallback to default options
+                    buildPermissionButtons([]);
+                });
+
             panel.classList.add('active');
         }
 
@@ -2745,21 +2813,11 @@ MAIN_TEMPLATE = """
             currentPermissionEvent = null;
         }
 
-        function handlePermission(action) {
-            if (action === 'yes') {
-                sendInput('y');
-            } else if (action === 'yes-all') {
-                sendInput('!');  // Send ! for "allow all session"
-            } else if (action === 'no') {
-                sendInput('n');
-            }
-            hidePermissionPanel();
-        }
-
-        let pendingPermissionAction = 'yes';  // Track which action to send with instructions
+        let pendingPermissionOption = '1';  // Track which option to send with instructions
 
         function showPermissionInput(action) {
-            pendingPermissionAction = action;
+            // action is like 'opt1', 'opt2', etc.
+            pendingPermissionOption = action.replace('opt', '');
             const extraInput = document.getElementById('permission-extra-input');
             extraInput.classList.add('active');
             document.getElementById('permission-extra-text').focus();
@@ -2767,7 +2825,7 @@ MAIN_TEMPLATE = """
 
         function sendPermissionWithText() {
             const extraText = document.getElementById('permission-extra-text').value.trim();
-            const action = pendingPermissionAction;
+            const optNum = pendingPermissionOption;
 
             if (extraText) {
                 // Send Tab first to enable text input mode, then the text
@@ -2790,8 +2848,8 @@ MAIN_TEMPLATE = """
                     }, 100);
                 });
             } else {
-                // No text, just send the selected action
-                handlePermission(action);
+                // No text, just send the selected option number
+                handlePermissionOption(optNum);
             }
         }
 
