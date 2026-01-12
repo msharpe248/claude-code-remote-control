@@ -26,7 +26,7 @@ import hashlib
 import logging
 import requests
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
@@ -319,60 +319,38 @@ class AccessibilityBackend(TerminalBackend):
     def _get_claude_processes(self) -> List[Dict[str, str]]:
         """Find running Claude processes via ps.
 
-        Session names are determined by finding claude processes whose parent
-        is claude-remote, then extracting the -s argument from claude-remote.
+        Session names are derived from TTY (e.g., "s006").
         """
         try:
-            # Get all processes with PID, PPID, and command
+            # Get all processes with PID, TTY, and command
             result = subprocess.run(
-                ['ps', '-axo', 'pid,ppid,command'],
+                ['ps', '-axo', 'pid,tty,command'],
                 capture_output=True,
                 text=True,
                 timeout=5
             )
 
-            # Build maps: pid -> command, pid -> ppid
-            pid_to_cmd = {}
-            pid_to_ppid = {}
-            claude_pids = []
-
+            processes = []
             for line in result.stdout.split('\n')[1:]:  # Skip header
                 parts = line.split(None, 2)  # Split into at most 3 parts
                 if len(parts) >= 3:
-                    pid, ppid, cmd = parts[0], parts[1], parts[2]
-                    pid_to_cmd[pid] = cmd
-                    pid_to_ppid[pid] = ppid
+                    pid, tty, cmd = parts[0], parts[1], parts[2]
 
-                    # Identify claude processes (not claude-remote wrapper)
+                    # Identify claude processes
                     if '/claude' in cmd or ' claude ' in cmd or cmd.endswith(' claude') or cmd.strip() == 'claude':
-                        # Skip if it's the wrapper script itself
-                        if 'claude-remote' in cmd:
-                            continue
                         # Skip tmux commands that happen to contain 'claude'
                         if cmd.startswith('tmux '):
                             continue
-                        claude_pids.append(pid)
 
-            processes = []
-            for pid in claude_pids:
-                session_name = None
-                ppid = pid_to_ppid.get(pid)
+                        # Use TTY as session name
+                        session_name = tty if tty and tty != '??' else None
 
-                # Check if parent is claude-remote and extract -s from it
-                if ppid and ppid in pid_to_cmd:
-                    parent_cmd = pid_to_cmd[ppid]
-                    if 'claude-remote' in parent_cmd:
-                        # Extract -s argument from parent command
-                        match = re.search(r'\s-s\s+([a-zA-Z0-9_-]+)', parent_cmd)
-                        if match:
-                            session_name = match.group(1)
-
-                processes.append({
-                    'pid': pid,
-                    'session': session_name,
-                    'ppid': ppid,
-                    'line': pid_to_cmd.get(pid, '')
-                })
+                        processes.append({
+                            'pid': pid,
+                            'session': session_name,
+                            'tty': tty,
+                            'line': cmd
+                        })
 
             return processes
         except Exception as e:
@@ -422,15 +400,14 @@ class AccessibilityBackend(TerminalBackend):
 
         log.debug(f"[accessibility] Found {len(terminal_contents)} terminal panes, {len(claude_procs)} Claude processes")
 
-        # Sort processes so named sessions come first (they get priority for matching)
-        # This ensures sessions started with `claude-remote -s <name>` get first pick
-        sorted_procs = sorted(claude_procs, key=lambda p: (p['session'] is None, p['pid']))
+        # Sort processes so explicitly named sessions come first (they get priority for matching)
+        # Sessions without explicit names will use TTY as session name
+        sorted_procs = sorted(claude_procs, key=lambda p: (p.get('tty') == p.get('session'), p['pid']))
 
         for proc in sorted_procs:
-            # Only track sessions explicitly started with claude-remote -s <name>
-            if not proc['session']:
-                continue
             session_name = proc['session']
+            if not session_name:
+                continue  # Skip if no session name (shouldn't happen now with TTY fallback)
 
             # Try to find matching terminal content
             matched_content = ""
@@ -464,7 +441,7 @@ class AccessibilityBackend(TerminalBackend):
                     score += 30
                 if "Anthropic" in deep_content:
                     score += 20
-                if "claude-remote" in deep_content or "claude-code" in deep_content.lower():
+                if "claude-code" in deep_content.lower():
                     score += 25
                 if "TodoWrite" in deep_content or "AskUserQuestion" in deep_content:
                     score += 30
@@ -773,6 +750,33 @@ class HookEvent:
         }
 
 
+@dataclass
+class RegisteredSession:
+    """A Claude session registered via hooks (auto-discovered or manually named)."""
+    session_id: str
+    name: str              # Friendly name (e.g., "myapp@ttys001")
+    cwd: str               # Working directory
+    tty: str               # Terminal (e.g., "ttys001")
+    custom_name: Optional[str] = None  # User-set override via API
+    registered_at: datetime = field(default_factory=datetime.now)
+
+    def display_name(self) -> str:
+        """Get the name to display (custom name takes priority)."""
+        return self.custom_name or self.name
+
+    def to_dict(self):
+        """Convert to JSON-serializable dict."""
+        return {
+            'session_id': self.session_id,
+            'name': self.name,
+            'display_name': self.display_name(),
+            'cwd': self.cwd,
+            'tty': self.tty,
+            'custom_name': self.custom_name,
+            'registered_at': self.registered_at.isoformat(),
+        }
+
+
 class GlobalState:
     def __init__(self):
         self.sessions = {}  # session_name -> SessionState
@@ -786,6 +790,9 @@ class GlobalState:
         # Hook events storage
         self.hook_events: List[HookEvent] = []  # Recent hook events (max 500)
         self.hook_clients: List = []  # WebSocket clients for hook updates
+
+        # Registered sessions (discovered via hooks)
+        self.registered_sessions: Dict[str, RegisteredSession] = {}  # session_id -> RegisteredSession
 
     def get_session(self, session_name):
         """Get or create session state."""
@@ -829,6 +836,57 @@ class GlobalState:
         if event_type:
             events = [e for e in events if e.event_type == event_type]
         return events[-limit:]
+
+    # ---- Session Registry Methods ----
+
+    @staticmethod
+    def normalize_tty(tty: str) -> str:
+        """Normalize TTY name for comparison (ttys006 -> s006, s006 -> s006)."""
+        if not tty:
+            return tty
+        # Strip /dev/ prefix if present
+        if tty.startswith('/dev/'):
+            tty = tty[5:]
+        # Strip 'tty' prefix if present (ttys006 -> s006)
+        if tty.startswith('tty'):
+            tty = tty[3:]
+        return tty
+
+    def register_session(self, session_id: str, name: str, cwd: str, tty: str):
+        """Register a session discovered via hooks."""
+        self.registered_sessions[session_id] = RegisteredSession(
+            session_id=session_id,
+            name=name,
+            cwd=cwd,
+            tty=tty,
+        )
+        log.info(f"[session] Registered session: {name} (id={session_id[:8]}..., tty={tty})")
+
+    def unregister_session(self, session_id: str):
+        """Remove a session from the registry."""
+        if session_id in self.registered_sessions:
+            sess = self.registered_sessions.pop(session_id)
+            log.info(f"[session] Unregistered session: {sess.display_name()} (id={session_id[:8]}...)")
+
+    def get_session_display_name(self, session_id: str) -> str:
+        """Get friendly display name for a session ID."""
+        sess = self.registered_sessions.get(session_id)
+        if sess:
+            return sess.display_name()
+        return session_id[:8]  # Fallback to short UUID
+
+    def set_session_custom_name(self, session_id: str, custom_name: str) -> bool:
+        """Set a custom name for a session."""
+        sess = self.registered_sessions.get(session_id)
+        if sess:
+            sess.custom_name = custom_name
+            log.info(f"[session] Set custom name: {custom_name} for session {session_id[:8]}...")
+            return True
+        return False
+
+    def get_registered_sessions(self) -> List[RegisteredSession]:
+        """Get all registered sessions."""
+        return list(self.registered_sessions.values())
 
 state = GlobalState()
 
@@ -2173,24 +2231,13 @@ MAIN_TEMPLATE = """
 
     <div id="refresh-indicator" title="Auto-refreshing"></div>
     <div class="container">
-        <h1>Claude Remote Control</h1>
+        <h1><a href="/" style="color: inherit; text-decoration: none;">Claude Remote Control</a></h1>
 
         <nav class="nav-links">
-            <a href="/" class="active">Control</a>
+            <a href="/control?session={{ session }}" class="active">Control</a>
             <a href="/terminal?session={{ session }}">Terminal</a>
-            <a href="/hooks">Hooks</a>
+            <a href="/hooks?session={{ session }}">Hooks</a>
         </nav>
-
-        {% if sessions|length > 1 %}
-        <div class="session-tabs">
-            {% for s in sessions %}
-            <a href="/?session={{ s.name }}" class="session-tab {{ 'active' if s.active else '' }}">
-                {{ s.name }}
-                {% if s.waiting %}<span class="badge">!</span>{% endif %}
-            </a>
-            {% endfor %}
-        </div>
-        {% endif %}
 
         <!-- Global Mode Indicator (always visible) -->
         <div class="global-mode-bar" onclick="cycleMode()" title="Click to cycle modes (shift+tab)">
@@ -2703,7 +2750,7 @@ MAIN_TEMPLATE = """
 
             // Match lines like "1. Yes", "  2. No", "❯ 1. Yes"
             // The pattern: optional cursor (❯), optional spaces, digit, dot, space, text
-            const regex = /^[❯\s]*(\d+)\.\s+(.+)$/gm;
+            const regex = /^[❯\\s]*(\\d+)\\.\\s+(.+)$/gm;
             let match;
             while ((match = regex.exec(tail)) !== null) {
                 const num = match[1];
@@ -2978,11 +3025,18 @@ MAIN_TEMPLATE = """
                 }
 
                 // If there's a PreToolUse that's newer than the last PostToolUse, show it
+                // But only if there's no Stop event after the question (which means it was abandoned)
+                const stopEvents = initialBatchEvents.filter(e => e.event_type === 'Stop');
+                const lastStopEvent = stopEvents.length > 0 ? stopEvents[stopEvents.length - 1] : null;
+
                 if (lastAskPre && (!lastAskPost || lastAskPre.timestamp > lastAskPost.timestamp)) {
-                    const toolInput = lastAskPre.tool_input;
-                    if (toolInput && toolInput.questions) {
-                        console.log('Found unanswered question from initial batch');
-                        showHookQuestion(toolInput.questions);
+                    // Don't show if there's a Stop event after the question
+                    if (!lastStopEvent || lastAskPre.timestamp > lastStopEvent.timestamp) {
+                        const toolInput = lastAskPre.tool_input;
+                        if (toolInput && toolInput.questions) {
+                            console.log('Found unanswered question from initial batch');
+                            showHookQuestion(toolInput.questions);
+                        }
                     }
                 }
 
@@ -3016,16 +3070,15 @@ MAIN_TEMPLATE = """
 
                 // Check for Stop event (Claude is idle)
                 // If the last event is Stop and there's no subsequent PreToolUse, show idle panel
-                const stopEvents = initialBatchEvents.filter(e => e.event_type === 'Stop');
-                const lastStop = stopEvents.length > 0 ? stopEvents[stopEvents.length - 1] : null;
-                if (lastStop) {
+                // (lastStopEvent is already defined above)
+                if (lastStopEvent) {
                     // Check if there's a PreToolUse after this Stop
                     const hasLaterPreToolUse = initialBatchEvents.some(e =>
-                        e.event_type === 'PreToolUse' && e.timestamp > lastStop.timestamp
+                        e.event_type === 'PreToolUse' && e.timestamp > lastStopEvent.timestamp
                     );
                     if (!hasLaterPreToolUse) {
-                        debugLog('Found idle state from batch: ' + (lastStop.reason || 'no reason'));
-                        showIdlePanel(lastStop.reason);
+                        debugLog('Found idle state from batch: ' + (lastStopEvent.reason || 'no reason'));
+                        showIdlePanel(lastStopEvent.reason);
                     }
                 }
 
@@ -3093,7 +3146,10 @@ MAIN_TEMPLATE = """
                     }
 
                     // Show idle panel when Claude stops (ready for new input)
+                    // Also hide any pending question/permission panels since they're no longer active
                     if (event.event_type === 'Stop') {
+                        hideHookQuestion();
+                        hidePermissionPanel();
                         showIdlePanel(event.reason);
                     }
 
@@ -3222,11 +3278,11 @@ TERMINAL_TEMPLATE = """
 </head>
 <body>
     <div class="header">
-        <h1>Terminal: {{ session }}{% if polling_mode %} ({{ backend_name }}){% endif %}</h1>
+        <h1><a href="/" style="color: inherit; text-decoration: none;">Terminal: {{ session }}{% if polling_mode %} ({{ backend_name }}){% endif %}</a></h1>
         <nav class="nav-links">
-            <a href="/">Control</a>
+            <a href="/control?session={{ session }}">Control</a>
             <a href="/terminal?session={{ session }}" class="active">Terminal</a>
-            <a href="/hooks">Hooks</a>
+            <a href="/hooks?session={{ session }}">Hooks</a>
         </nav>
     </div>
     <div id="terminal-container">
@@ -3255,7 +3311,7 @@ TERMINAL_TEMPLATE = """
 
         function stripAnsi(str) {
             // Remove ANSI escape codes for cleaner display
-            return str.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+            return str.replace(/\\x1b\\[[0-9;]*[a-zA-Z]/g, '');
         }
 
         function pollContent() {
@@ -3632,11 +3688,11 @@ HOOKS_TEMPLATE = """
 </head>
 <body>
     <div class="container">
-        <h1>Hook Events</h1>
+        <h1><a href="/" style="color: inherit; text-decoration: none;">Hook Events{% if session %}: {{ session }}{% endif %}</a></h1>
         <nav class="nav-links">
-            <a href="/">Control</a>
-            <a href="/terminal">Terminal</a>
-            <a href="/hooks" class="active">Hooks</a>
+            <a href="/control{% if session %}?session={{ session }}{% endif %}">Control</a>
+            <a href="/terminal{% if session %}?session={{ session }}{% endif %}">Terminal</a>
+            <a href="/hooks{% if session %}?session={{ session }}{% endif %}" class="active">Hooks</a>
         </nav>
 
         <div class="status-bar">
@@ -3684,6 +3740,9 @@ HOOKS_TEMPLATE = """
         let activeFilter = 'all';
         let ws = null;
         let expandedEventId = null;
+        // Get session filter from URL if present
+        const urlParams = new URLSearchParams(window.location.search);
+        const sessionFilter = urlParams.get('session');
 
         function formatTime(isoString) {
             const d = new Date(isoString);
@@ -3845,9 +3904,14 @@ HOOKS_TEMPLATE = """
 
         function renderEvents() {
             const tbody = document.getElementById('eventsBody');
+            // First filter by session if sessionFilter is set
+            let sessionFiltered = sessionFilter
+                ? events.filter(e => e.session_id && e.session_id.includes(sessionFilter))
+                : events;
+            // Then filter by event type
             const filtered = activeFilter === 'all'
-                ? events
-                : events.filter(e => e.event_type === activeFilter);
+                ? sessionFiltered
+                : sessionFiltered.filter(e => e.event_type === activeFilter);
 
             if (filtered.length === 0) {
                 tbody.innerHTML = `
@@ -3970,6 +4034,503 @@ HOOKS_TEMPLATE = """
 </html>
 """
 
+SESSIONS_TEMPLATE = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Sessions - Claude Remote Control</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0f172a;
+            color: #e2e8f0;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container { max-width: 900px; margin: 0 auto; }
+        h1 { margin-bottom: 20px; font-size: 1.5rem; }
+        .nav-links {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 30px;
+            padding-bottom: 15px;
+            border-bottom: 1px solid #334155;
+        }
+        .nav-links a {
+            color: #94a3b8;
+            text-decoration: none;
+            padding: 8px 16px;
+            border-radius: 6px;
+            transition: all 0.2s;
+        }
+        .nav-links a:hover { background: #1e293b; color: #e2e8f0; }
+        .nav-links a.active { background: #6366f1; color: white; }
+
+        .sessions-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        .session-count {
+            color: #64748b;
+            font-size: 0.875rem;
+        }
+        .refresh-btn {
+            background: #1e293b;
+            border: 1px solid #334155;
+            color: #e2e8f0;
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.875rem;
+        }
+        .refresh-btn:hover { background: #334155; }
+
+        .sessions-list {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        .session-card {
+            background: #1e293b;
+            border: 1px solid #334155;
+            border-radius: 8px;
+            padding: 16px;
+        }
+        .session-card:hover { border-color: #475569; }
+
+        .session-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 12px;
+        }
+        .session-name-section { flex: 1; }
+        .session-display-name {
+            font-size: 1.125rem;
+            font-weight: 600;
+            color: #f1f5f9;
+            margin-bottom: 4px;
+        }
+        .session-auto-name {
+            font-size: 0.75rem;
+            color: #64748b;
+        }
+        .session-id {
+            font-family: monospace;
+            font-size: 0.75rem;
+            color: #64748b;
+            background: #0f172a;
+            padding: 2px 6px;
+            border-radius: 4px;
+        }
+        .source-badge {
+            font-size: 0.625rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            padding: 2px 6px;
+            border-radius: 4px;
+            margin-left: 8px;
+        }
+        .source-badge.hooks {
+            background: #065f46;
+            color: #a7f3d0;
+        }
+        .source-badge.process {
+            background: #1e40af;
+            color: #bfdbfe;
+        }
+        .hook-badge {
+            font-size: 0.625rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            padding: 2px 6px;
+            border-radius: 4px;
+            margin-left: 6px;
+        }
+        .hook-badge.global {
+            background: #854d0e;
+            color: #fef3c7;
+        }
+        .hook-badge.local {
+            background: #166534;
+            color: #bbf7d0;
+        }
+        .hook-badge.none {
+            background: #374151;
+            color: #9ca3af;
+        }
+        .install-hooks-btn {
+            font-size: 0.625rem;
+            padding: 2px 6px;
+            background: #374151;
+            color: #d1d5db;
+            border: 1px solid #4b5563;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-left: 6px;
+        }
+        .install-hooks-btn:hover {
+            background: #4b5563;
+            color: white;
+        }
+
+        .session-details {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+        .detail-item {
+            font-size: 0.875rem;
+        }
+        .detail-label {
+            color: #64748b;
+            margin-right: 8px;
+        }
+        .detail-value {
+            color: #cbd5e1;
+            font-family: monospace;
+            word-break: break-all;
+        }
+
+        .session-actions {
+            display: flex;
+            gap: 8px;
+            padding-top: 12px;
+            border-top: 1px solid #334155;
+            flex-wrap: wrap;
+        }
+        .action-btn {
+            padding: 6px 12px;
+            border-radius: 4px;
+            font-size: 0.875rem;
+            cursor: pointer;
+            border: 1px solid transparent;
+            transition: all 0.2s;
+        }
+        .terminal-btn {
+            background: #7c3aed;
+            color: white;
+        }
+        .terminal-btn:hover { background: #8b5cf6; }
+        .hooks-btn {
+            background: #0891b2;
+            color: white;
+        }
+        .hooks-btn:hover { background: #06b6d4; }
+        .rename-btn {
+            background: #1e40af;
+            color: white;
+        }
+        .rename-btn:hover { background: #1d4ed8; }
+        .delete-btn {
+            background: transparent;
+            border-color: #dc2626;
+            color: #dc2626;
+        }
+        .delete-btn:hover { background: #dc2626; color: white; }
+        .control-btn {
+            background: #065f46;
+            color: white;
+        }
+        .control-btn:hover { background: #047857; }
+
+        .rename-form {
+            display: none;
+            gap: 8px;
+            align-items: center;
+            margin-top: 12px;
+            padding-top: 12px;
+            border-top: 1px solid #334155;
+        }
+        .rename-form.active { display: flex; }
+        .rename-input {
+            flex: 1;
+            padding: 8px 12px;
+            border: 1px solid #334155;
+            border-radius: 4px;
+            background: #0f172a;
+            color: #e2e8f0;
+            font-size: 0.875rem;
+        }
+        .rename-input:focus {
+            outline: none;
+            border-color: #6366f1;
+        }
+        .save-btn {
+            background: #059669;
+            color: white;
+            padding: 8px 16px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .save-btn:hover { background: #10b981; }
+        .cancel-btn {
+            background: #475569;
+            color: white;
+            padding: 8px 16px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .cancel-btn:hover { background: #64748b; }
+
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: #64748b;
+        }
+        .empty-state h2 {
+            font-size: 1.25rem;
+            margin-bottom: 12px;
+            color: #94a3b8;
+        }
+        .empty-state p { margin-bottom: 8px; }
+        .empty-state code {
+            background: #1e293b;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.875rem;
+        }
+
+        .status-message {
+            padding: 12px 16px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+            display: none;
+        }
+        .status-message.success {
+            display: block;
+            background: #065f46;
+            color: #a7f3d0;
+        }
+        .status-message.error {
+            display: block;
+            background: #7f1d1d;
+            color: #fecaca;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1><a href="/" style="color: inherit; text-decoration: none;">Claude Remote Control</a></h1>
+
+        <div id="status-message" class="status-message"></div>
+
+        <div class="sessions-header">
+            <div>
+                <h2 style="font-size: 1.25rem; margin-bottom: 4px;">Registered Sessions</h2>
+                <span class="session-count" id="session-count">Loading...</span>
+            </div>
+            <button class="refresh-btn" onclick="loadSessions()">Refresh</button>
+        </div>
+
+        <div id="sessions-list" class="sessions-list">
+            <div class="empty-state">
+                <p>Loading sessions...</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function showStatus(message, isError) {
+            const el = document.getElementById('status-message');
+            el.textContent = message;
+            el.className = 'status-message ' + (isError ? 'error' : 'success');
+            setTimeout(() => { el.className = 'status-message'; }, 3000);
+        }
+
+        function loadSessions() {
+            fetch('/api/sessions')
+                .then(r => r.json())
+                .then(data => {
+                    const container = document.getElementById('sessions-list');
+                    const countEl = document.getElementById('session-count');
+
+                    const hooked = data.registered_count || 0;
+                    const discovered = data.discovered_count || 0;
+                    countEl.textContent = `${data.count} session${data.count !== 1 ? 's' : ''} (${hooked} via hooks, ${discovered} discovered)`;
+
+                    if (data.sessions.length === 0) {
+                        container.innerHTML = `
+                            <div class="empty-state">
+                                <h2>No Sessions Detected</h2>
+                                <p>No running Claude Code CLI instances found.</p>
+                                <p>Start a Claude Code session with: <code>claude</code></p>
+                            </div>
+                        `;
+                        return;
+                    }
+
+                    container.innerHTML = data.sessions.map(s => {
+                        const isHooked = s.source === 'hooks';
+                        const idDisplay = s.pid ? `PID ${s.pid}` : s.session_id.substring(0, 12) + '...';
+                        const hookStatus = s.hook_status || 'none';
+                        const hookBadge = hookStatus === 'both' ? '<span class="hook-badge global">Global</span><span class="hook-badge local">Local</span>'
+                            : hookStatus === 'global' ? '<span class="hook-badge global">Global Hooks</span>'
+                            : hookStatus === 'local' ? '<span class="hook-badge local">Local Hooks</span>'
+                            : `<span class="hook-badge none">No Hooks</span><button class="install-hooks-btn" onclick="showInstallHooks('${escapeHtml(s.cwd)}')">Install</button>`;
+                        return `
+                        <div class="session-card" id="session-${s.session_id}">
+                            <div class="session-header">
+                                <div class="session-name-section">
+                                    <div class="session-display-name">
+                                        ${escapeHtml(s.display_name)}
+                                        ${hookBadge}
+                                    </div>
+                                    ${s.custom_name ? `<div class="session-auto-name">Auto: ${escapeHtml(s.name)}</div>` : ''}
+                                </div>
+                                <span class="session-id">${escapeHtml(idDisplay)}</span>
+                            </div>
+                            <div class="session-details">
+                                <div class="detail-item">
+                                    <span class="detail-label">TTY:</span>
+                                    <span class="detail-value">${escapeHtml(s.tty)}</span>
+                                </div>
+                                <div class="detail-item">
+                                    <span class="detail-label">Directory:</span>
+                                    <span class="detail-value">${escapeHtml(s.cwd)}</span>
+                                </div>
+                            </div>
+                            <div class="session-actions">
+                                ${hookStatus !== 'none' ? `<button class="action-btn control-btn" onclick="goToControl('${escapeHtml(s.tty)}')">Control</button>` : ''}
+                                <button class="action-btn terminal-btn" onclick="goToTerminal('${escapeHtml(s.tty)}')">Terminal</button>
+                                ${hookStatus !== 'none' ? `<button class="action-btn hooks-btn" onclick="goToHooks()">Hooks</button>` : ''}
+                                ${isHooked ? `<button class="action-btn rename-btn" onclick="showRenameForm('${escapeHtml(s.session_id)}')">Rename</button>` : ''}
+                                ${isHooked ? `<button class="action-btn delete-btn" onclick="deleteSession('${escapeHtml(s.session_id)}')">Remove</button>` : ''}
+                            </div>
+                            ${isHooked ? `
+                            <div class="rename-form" id="rename-form-${s.session_id}">
+                                <input type="text" class="rename-input" id="rename-input-${s.session_id}"
+                                       placeholder="Enter custom name" value="${escapeHtml(s.custom_name || '')}">
+                                <button class="save-btn" onclick="saveRename('${escapeHtml(s.session_id)}')">Save</button>
+                                <button class="cancel-btn" onclick="hideRenameForm('${escapeHtml(s.session_id)}')">Cancel</button>
+                            </div>
+                            ` : ''}
+                        </div>
+                    `}).join('');
+                })
+                .catch(err => {
+                    console.error('Failed to load sessions:', err);
+                    showStatus('Failed to load sessions', true);
+                });
+        }
+
+        function escapeHtml(str) {
+            if (!str) return '';
+            return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        }
+
+        function formatTime(isoStr) {
+            if (!isoStr) return 'Unknown';
+            const d = new Date(isoStr);
+            return d.toLocaleString();
+        }
+
+        function goToControl(tty) {
+            // Route using TTY which works for both registered and discovered sessions
+            window.location.href = '/control?session=' + encodeURIComponent(tty);
+        }
+
+        function goToTerminal(tty) {
+            window.location.href = '/terminal?session=' + encodeURIComponent(tty);
+        }
+
+        function goToHooks() {
+            window.location.href = '/hooks';
+        }
+
+        function showInstallHooks(cwd) {
+            const hooksDir = '/Users/msharpe/projects/remotecontrol/hooks';
+            const instructions = `To install hooks for this session, add the following to your Claude settings:
+
+Global (~/.claude/settings.json):
+{
+  "hooks": {
+    "PreToolUse": ["${hooksDir}/notify.sh"],
+    "PostToolUse": ["${hooksDir}/notify.sh"],
+    "Stop": ["${hooksDir}/notify.sh"],
+    "Notification": ["${hooksDir}/notify.sh"]
+  }
+}
+
+Or local (${cwd}/.claude/settings.json) for project-specific hooks.
+
+After adding hooks, restart Claude Code for changes to take effect.`;
+            alert(instructions);
+        }
+
+        function showRenameForm(sessionId) {
+            document.getElementById('rename-form-' + sessionId).classList.add('active');
+            document.getElementById('rename-input-' + sessionId).focus();
+        }
+
+        function hideRenameForm(sessionId) {
+            document.getElementById('rename-form-' + sessionId).classList.remove('active');
+        }
+
+        function saveRename(sessionId) {
+            const input = document.getElementById('rename-input-' + sessionId);
+            const name = input.value.trim();
+
+            fetch('/api/session/' + encodeURIComponent(sessionId) + '/name', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: name || null })
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    showStatus(name ? 'Session renamed to "' + name + '"' : 'Custom name removed', false);
+                    loadSessions();
+                } else {
+                    showStatus(data.error || 'Failed to rename session', true);
+                }
+            })
+            .catch(err => {
+                console.error('Rename failed:', err);
+                showStatus('Failed to rename session', true);
+            });
+        }
+
+        function deleteSession(sessionId) {
+            if (!confirm('Remove this session from tracking? (This does not stop Claude Code)')) {
+                return;
+            }
+
+            fetch('/api/session/' + encodeURIComponent(sessionId), {
+                method: 'DELETE'
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    showStatus('Session removed', false);
+                    loadSessions();
+                } else {
+                    showStatus(data.error || 'Failed to remove session', true);
+                }
+            })
+            .catch(err => {
+                console.error('Delete failed:', err);
+                showStatus('Failed to remove session', true);
+            });
+        }
+
+        // Initial load
+        loadSessions();
+
+        // Auto-refresh every 10 seconds
+        setInterval(loadSessions, 10000);
+    </script>
+</body>
+</html>
+"""
+
 # ============================================================================
 # Routes
 # ============================================================================
@@ -4005,11 +4566,23 @@ def detect_idle_from_terminal(content: str) -> bool:
 @app.route('/')
 @requires_auth
 def index():
+    """Sessions overview - the landing page."""
+    return render_template_string(SESSIONS_TEMPLATE)
+
+
+@app.route('/control')
+@requires_auth
+def control():
+    """Control panel for a specific session."""
     # Get session from query param, or use first available
     sessions = backend.get_sessions()
     selected_session = request.args.get('session')
 
-    if not selected_session or selected_session not in sessions:
+    # Redirect to sessions page if no session specified
+    if not selected_session:
+        return redirect('/')
+
+    if selected_session not in sessions:
         # Default to first session
         if sessions:
             selected_session = sessions[0]
@@ -4060,13 +4633,29 @@ def index():
             content = backend.get_content(selected_session)
             is_idle = detect_idle_from_terminal(content)
 
-    # Build session info for UI
+    # Build session info for UI - combine backend sessions with registered sessions
     sessions_info = []
-    for s in sessions:
+    seen_session_ids = set()
+
+    # First, add registered sessions (from hooks) with friendly names
+    for reg_sess in state.get_registered_sessions():
         sessions_info.append({
-            'name': s,
-            'active': s == selected_session
+            'id': reg_sess.session_id,
+            'name': reg_sess.display_name(),
+            'active': reg_sess.session_id == selected_session or reg_sess.name == selected_session,
+            'tty': reg_sess.tty,
+            'cwd': reg_sess.cwd,
         })
+        seen_session_ids.add(reg_sess.session_id)
+
+    # Then add any backend sessions not already in registered (backwards compatibility)
+    for s in sessions:
+        if s not in seen_session_ids:
+            sessions_info.append({
+                'id': s,
+                'name': s,
+                'active': s == selected_session
+            })
 
     return render_template_string(
         MAIN_TEMPLATE,
@@ -4100,7 +4689,15 @@ def terminal():
 @requires_auth
 def hooks():
     """Hook events visualization page."""
-    return render_template_string(HOOKS_TEMPLATE)
+    session = request.args.get('session')
+    return render_template_string(HOOKS_TEMPLATE, session=session)
+
+
+@app.route('/sessions')
+@requires_auth
+def sessions_page_redirect():
+    """Redirect old /sessions URL to home."""
+    return redirect('/')
 
 
 @app.route('/send', methods=['POST'])
@@ -4334,6 +4931,22 @@ def api_hook():
 
         log.info(f"[hook] {event_type}: {tool_name or reason or 'no details'} (session: {session_id})")
 
+        # Auto-register session on first event (Claude Code doesn't send SessionStart)
+        if session_id not in state.registered_sessions:
+            cwd = data.get('cwd', '')
+            tty = data.get('tty', 'unknown')  # Injected by notify.sh
+
+            # Derive friendly name: basename@tty
+            dir_name = os.path.basename(cwd) if cwd else 'claude'
+            friendly_name = f"{dir_name}@{tty}"
+
+            state.register_session(session_id, friendly_name, cwd, tty)
+
+        # Handle session end event
+        if event_type == 'SessionEnd':
+            # Remove the session from the registry
+            state.unregister_session(session_id)
+
         # Determine if this event should trigger a notification
         should_notify = False
         notification_message = None
@@ -4391,6 +5004,247 @@ def api_hooks():
         'events': [e.to_dict() for e in events],
         'total': len(state.hook_events)
     })
+
+
+# ============================================================================
+# Session Management API
+# ============================================================================
+
+def discover_claude_processes():
+    """Discover running Claude Code CLI processes using ps and lsof."""
+    discovered = []
+    try:
+        # Find claude CLI processes (not Claude.app)
+        ps_result = subprocess.run(
+            ['ps', 'aux'],
+            capture_output=True, text=True, timeout=5
+        )
+
+        claude_pids = []
+        for line in ps_result.stdout.splitlines():
+            # Match "claude " at the end (CLI) but not Claude.app paths
+            if 'claude ' in line.lower() and '/Applications/Claude.app' not in line:
+                parts = line.split()
+                if len(parts) >= 2:
+                    try:
+                        pid = int(parts[1])
+                        # Extract TTY (column 6 in ps aux)
+                        tty = parts[6] if len(parts) > 6 else '??'
+                        claude_pids.append((pid, tty))
+                    except ValueError:
+                        continue
+
+        if not claude_pids:
+            return discovered
+
+        # Get working directories using lsof
+        pid_list = ','.join(str(p[0]) for p in claude_pids)
+        lsof_result = subprocess.run(
+            ['lsof', '-p', pid_list],
+            capture_output=True, text=True, timeout=5
+        )
+
+        # Parse lsof output for cwd entries
+        pid_to_cwd = {}
+        for line in lsof_result.stdout.splitlines():
+            if ' cwd ' in line:
+                parts = line.split()
+                if len(parts) >= 2:
+                    try:
+                        pid = int(parts[1])
+                        # cwd path is the last element
+                        cwd = parts[-1]
+                        pid_to_cwd[pid] = cwd
+                    except ValueError:
+                        continue
+
+        # Build discovered sessions
+        for pid, tty in claude_pids:
+            cwd = pid_to_cwd.get(pid, '')
+            dir_name = os.path.basename(cwd) if cwd else 'claude'
+            discovered.append({
+                'pid': pid,
+                'tty': tty,
+                'cwd': cwd,
+                'name': f"{dir_name}@{tty}",
+                'source': 'process'
+            })
+
+    except Exception as e:
+        log.warning(f"[sessions] Failed to discover processes: {e}")
+
+    return discovered
+
+
+def detect_hooks_for_session(cwd: str) -> dict:
+    """Detect if Claude hooks are configured for a session.
+
+    Checks:
+    1. Global hooks in ~/.claude/settings.json
+    2. Local hooks in <cwd>/.claude/settings.json
+
+    Returns dict with:
+        - global_hooks: bool - True if hooks configured globally
+        - local_hooks: bool - True if hooks configured locally
+        - hook_status: str - 'global', 'local', 'both', or 'none'
+    """
+    result = {
+        'global_hooks': False,
+        'local_hooks': False,
+        'hook_status': 'none'
+    }
+
+    def has_hooks_configured(settings_path: str) -> bool:
+        """Check if a settings.json file has hooks configured."""
+        try:
+            if not os.path.exists(settings_path):
+                return False
+            with open(settings_path, 'r') as f:
+                settings = json.load(f)
+            # Check for hooks configuration
+            hooks = settings.get('hooks', {})
+            if hooks:
+                # Check if any hook type has commands configured
+                for hook_type in ['PreToolUse', 'PostToolUse', 'Stop', 'Notification']:
+                    if hook_type in hooks and hooks[hook_type]:
+                        return True
+            return False
+        except Exception:
+            return False
+
+    # Check global hooks
+    global_settings = os.path.expanduser('~/.claude/settings.json')
+    result['global_hooks'] = has_hooks_configured(global_settings)
+
+    # Check local hooks
+    if cwd:
+        local_settings = os.path.join(cwd, '.claude', 'settings.json')
+        result['local_hooks'] = has_hooks_configured(local_settings)
+
+    # Determine overall status
+    if result['global_hooks'] and result['local_hooks']:
+        result['hook_status'] = 'both'
+    elif result['global_hooks']:
+        result['hook_status'] = 'global'
+    elif result['local_hooks']:
+        result['hook_status'] = 'local'
+    else:
+        result['hook_status'] = 'none'
+
+    return result
+
+
+@app.route('/api/sessions')
+@requires_auth
+def api_sessions():
+    """Get all sessions: both registered (via hooks) and discovered (via ps)."""
+    # Get hook-registered sessions
+    registered = state.get_registered_sessions()
+
+    # Discover running Claude processes
+    discovered = discover_claude_processes()
+
+    # Build a map of cwd -> discovered process for matching
+    cwd_to_discovered = {}
+    for proc in discovered:
+        cwd = proc.get('cwd', '')
+        if cwd and cwd not in cwd_to_discovered:
+            cwd_to_discovered[cwd] = proc
+
+    # Track which discovered processes have been matched to registered sessions
+    # Use normalized TTYs for comparison (ttys006 and s006 should match)
+    matched_discovered_ttys = set()
+
+    # Build combined session list
+    sessions = []
+
+    # Add registered sessions first, matching with discovered processes when possible
+    for s in registered:
+        d = s.to_dict()
+        d['source'] = 'hooks'
+
+        # If TTY is unknown/invalid, try to match by cwd to get real TTY/PID
+        tty = s.tty
+        if not tty or tty == 'unknown' or 'not a tty' in tty.lower():
+            matched_proc = cwd_to_discovered.get(s.cwd)
+            if matched_proc:
+                # Update with discovered process info
+                d['tty'] = matched_proc['tty']
+                d['pid'] = matched_proc['pid']
+                # Update the name to use the real TTY
+                dir_name = os.path.basename(s.cwd) if s.cwd else 'claude'
+                d['name'] = f"{dir_name}@{matched_proc['tty']}"
+                if not s.custom_name:
+                    d['display_name'] = d['name']
+                matched_discovered_ttys.add(state.normalize_tty(matched_proc['tty']))
+
+        # Track valid TTYs for deduplication (using normalized form)
+        if d.get('tty') and d['tty'] != 'unknown' and 'not a tty' not in d.get('tty', '').lower():
+            matched_discovered_ttys.add(state.normalize_tty(d['tty']))
+
+        # Add hook detection info
+        hook_info = detect_hooks_for_session(s.cwd)
+        d.update(hook_info)
+        sessions.append(d)
+
+    # Add discovered processes that haven't been matched to registered sessions
+    for proc in discovered:
+        if state.normalize_tty(proc['tty']) not in matched_discovered_ttys:
+            # Add hook detection info
+            hook_info = detect_hooks_for_session(proc['cwd'])
+            sessions.append({
+                'session_id': f"pid-{proc['pid']}",
+                'name': proc['name'],
+                'display_name': proc['name'],
+                'cwd': proc['cwd'],
+                'tty': proc['tty'],
+                'pid': proc['pid'],
+                'custom_name': None,
+                'registered_at': None,
+                'source': 'process',
+                **hook_info
+            })
+
+    return jsonify({
+        'sessions': sessions,
+        'count': len(sessions),
+        'registered_count': len(registered),
+        'discovered_count': len(discovered)
+    })
+
+
+@app.route('/api/session/<session_id>/name', methods=['POST'])
+@requires_auth
+def api_session_set_name(session_id):
+    """Set a custom name for a session."""
+    try:
+        data = request.get_json()
+        if not data or 'name' not in data:
+            return jsonify({'error': 'Missing "name" in request body'}), 400
+
+        custom_name = data['name'].strip()
+        if not custom_name:
+            return jsonify({'error': 'Name cannot be empty'}), 400
+
+        success = state.set_session_custom_name(session_id, custom_name)
+        if success:
+            return jsonify({'success': True, 'name': custom_name})
+        else:
+            return jsonify({'error': 'Session not found'}), 404
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/session/<session_id>', methods=['DELETE'])
+@requires_auth
+def api_session_delete(session_id):
+    """Manually remove a session from tracking."""
+    if session_id in state.registered_sessions:
+        state.unregister_session(session_id)
+        return jsonify({'success': True})
+    else:
+        return jsonify({'error': 'Session not found'}), 404
 
 
 # ============================================================================
