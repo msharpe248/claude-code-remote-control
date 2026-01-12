@@ -236,14 +236,15 @@ class TmuxBackend(TerminalBackend):
 
 
 # Supported terminals for macOS Accessibility backend
-# Maps display name -> (process names to search for, AppleScript app name)
+# Maps display name -> (window owner names, app name for activation, process name for System Events)
+# Note: System Events process names are case-sensitive and often lowercase
 SUPPORTED_TERMINALS = {
-    'Ghostty': (['Ghostty'], 'Ghostty'),
-    'iTerm2': (['iTerm2', 'iTerm'], 'iTerm'),
-    'Terminal': (['Terminal'], 'Terminal'),
-    'Kitty': (['kitty'], 'kitty'),
-    'Alacritty': (['Alacritty', 'alacritty'], 'Alacritty'),
-    'WezTerm': (['WezTerm', 'wezterm-gui'], 'WezTerm'),
+    'Ghostty': (['Ghostty'], 'Ghostty', 'ghostty'),
+    'iTerm2': (['iTerm2', 'iTerm'], 'iTerm', 'iTerm2'),
+    'Terminal': (['Terminal'], 'Terminal', 'Terminal'),
+    'Kitty': (['kitty'], 'kitty', 'kitty'),
+    'Alacritty': (['Alacritty', 'alacritty'], 'Alacritty', 'Alacritty'),
+    'WezTerm': (['WezTerm', 'wezterm-gui'], 'WezTerm', 'WezTerm'),
 }
 
 
@@ -257,7 +258,8 @@ class AccessibilityBackend(TerminalBackend):
         self._last_refresh = 0
         self._refresh_interval = 1.0  # Seconds between tree refreshes
         self._detected_terminal: Optional[str] = None  # e.g., 'Ghostty', 'iTerm2'
-        self._applescript_name: Optional[str] = None   # e.g., 'Ghostty', 'iTerm'
+        self._applescript_name: Optional[str] = None   # e.g., 'Ghostty', 'iTerm' (for tell application)
+        self._process_name: Optional[str] = None       # e.g., 'ghostty' (for System Events tell process)
 
     @property
     def name(self) -> str:
@@ -284,13 +286,14 @@ class AccessibilityBackend(TerminalBackend):
         windows = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID)
 
         # Try each supported terminal
-        for terminal_name, (process_names, applescript_name) in SUPPORTED_TERMINALS.items():
+        for terminal_name, (window_names, applescript_name, process_name) in SUPPORTED_TERMINALS.items():
             for window in windows:
                 owner = window.get('kCGWindowOwnerName', '')
                 pid = window.get('kCGWindowOwnerPID', 0)
-                if owner in process_names and pid:
+                if owner in window_names and pid:
                     self._detected_terminal = terminal_name
                     self._applescript_name = applescript_name
+                    self._process_name = process_name
                     log.info(f"[accessibility] Detected terminal: {terminal_name} (pid={pid})")
                     return pid
 
@@ -640,20 +643,25 @@ class AccessibilityBackend(TerminalBackend):
 
     def send_shift_tab(self, session: str) -> bool:
         """Send Shift+Tab to the detected terminal (cycles Claude modes)."""
-        if not self._applescript_name:
+        if not self._applescript_name or not self._process_name:
             log.error("[accessibility] No terminal detected, cannot send Shift+Tab")
             return False
 
         app_name = self._applescript_name
+        process_name = self._process_name
         try:
-            # Key code 48 is Tab, with shift down
+            # Use key code 48 (Tab) with shift modifier
+            # Note: app_name is for activation, process_name is for System Events (case-sensitive)
             script = f'''
             tell application "{app_name}" to activate
             delay 0.2
             tell application "System Events"
-                key code 48 using shift down
+                tell process "{process_name}"
+                    key code 48 using {{shift down}}
+                end tell
             end tell
             '''
+            log.info(f"[accessibility] Sending Shift+Tab to {app_name} (process: {process_name})")
             result = subprocess.run(
                 ['osascript', '-e', script],
                 capture_output=True,
@@ -663,6 +671,7 @@ class AccessibilityBackend(TerminalBackend):
             if result.returncode != 0:
                 log.error(f"[accessibility] AppleScript error: {result.stderr}")
                 return False
+            log.info(f"[accessibility] Shift+Tab sent successfully")
             return True
         except subprocess.TimeoutExpired:
             log.error("[accessibility] AppleScript timed out sending Shift+Tab")
@@ -2295,33 +2304,16 @@ MAIN_TEMPLATE = """
             });
         }
 
-        // Current mode tracking
-        let currentMode = 'normal';  // 'normal', 'plan', 'edits'
+        // Current mode tracking - initialize from server-detected mode
+        let currentMode = '{{ initial_mode }}';  // 'normal', 'plan', 'edits'
 
         function cycleMode() {
-            console.log('cycleMode called, session:', currentSession);
+            // Just send shift+tab - UI will update from terminal content detection
             fetch('/send-shift-tab', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({session: currentSession})
-            }).then(r => {
-                console.log('Response status:', r.status);
-                return r.json();
-            }).then(d => {
-                console.log('Response data:', d);
-                if(d.success) {
-                    // Cycle through modes optimistically while waiting for terminal update
-                    // Claude's order: normal → edits → plan → normal
-                    const modes = ['normal', 'edits', 'plan'];
-                    const nextIndex = (modes.indexOf(currentMode) + 1) % modes.length;
-                    updateModeDisplay(modes[nextIndex]);
-                } else {
-                    alert('Error: ' + d.error);
-                }
-            }).catch(err => {
-                console.error('cycleMode error:', err);
-                alert('Network error: ' + err.message);
-            });
+            }).catch(err => console.error('cycleMode error:', err));
         }
 
         function updateModeDisplay(mode) {
@@ -2353,10 +2345,10 @@ MAIN_TEMPLATE = """
 
         function detectModeFromContent(content) {
             if (!content) return 'normal';
-            // Check last 500 chars for mode indicators
+            // Check last 500 chars for mode indicators (using actual Unicode chars)
             const tail = content.slice(-500);
-            if (tail.includes('plan mode on')) return 'plan';
-            if (tail.includes('accept edits on')) return 'edits';
+            if (tail.includes('⏵⏵ accept edits on')) return 'edits';
+            if (tail.includes('⏸ plan mode on')) return 'plan';
             return 'normal';
         }
 
@@ -2445,6 +2437,11 @@ MAIN_TEMPLATE = """
                             compactingOverlay.classList.remove('active');
                         }
                     }
+
+                    // Update mode display from terminal content
+                    if (data.mode && data.mode !== currentMode) {
+                        updateModeDisplay(data.mode);
+                    }
                 })
                 .catch(e => console.log('Status check failed:', e))
                 .finally(() => {
@@ -2453,6 +2450,9 @@ MAIN_TEMPLATE = """
                 });
         }
         checkCompactingState();
+
+        // Set initial mode display on page load
+        updateModeDisplay(currentMode);
 
         // ============================================================
         // Hook-based Question UI
@@ -3829,9 +3829,19 @@ def index():
 
     is_compacting = False
     is_idle = False
+    initial_mode = 'normal'
     if selected_session:
         session_state = state.get_session(selected_session)
         is_compacting = session_state.is_compacting
+
+        # Detect initial mode from terminal content
+        content = backend.get_content(selected_session)
+        if content:
+            tail = content[-500:]
+            if '⏵⏵ accept edits on' in tail:
+                initial_mode = 'edits'
+            elif '⏸ plan mode on' in tail:
+                initial_mode = 'plan'
 
         # Determine idle state from hook events first, terminal detection as fallback
         hook_events = state.hook_events
@@ -3874,7 +3884,8 @@ def index():
         notifications_paused=state.notifications_paused,
         notification_mode=state.notification_mode,
         is_compacting=is_compacting,
-        is_idle=is_idle
+        is_idle=is_idle,
+        initial_mode=initial_mode
     )
 
 @app.route('/terminal')
@@ -4002,15 +4013,25 @@ def api_status():
     sessions = backend.get_sessions()
 
     is_compacting = False
+    mode = 'normal'
     if session:
         session_state = state.get_session(session)
         is_compacting = session_state.is_compacting
+        # Detect mode from terminal content
+        content = backend.get_content(session)
+        if content:
+            tail = content[-500:]
+            if '⏵⏵ accept edits on' in tail:
+                mode = 'edits'
+            elif '⏸ plan mode on' in tail:
+                mode = 'plan'
 
     return jsonify({
         'is_compacting': is_compacting,
         'session': session,
         'sessions': sessions,
-        'backend': backend.name
+        'backend': backend.name,
+        'mode': mode
     })
 
 @app.route('/test-notify', methods=['GET', 'POST'])
