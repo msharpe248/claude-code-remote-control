@@ -3998,21 +3998,28 @@ def main():
     accessibility_status = "available" if (_accessibility_backend and _accessibility_backend.is_available()) else "not available"
     tmux_status = "available" if _tmux_backend.is_available() else "not available"
 
-    print(f"""
-╔═══════════════════════════════════════════════════════════╗
-║         Claude Code Remote Control Server                  ║
-╠═══════════════════════════════════════════════════════════╣
-║  Control Panel: http://{local_ip}:{port}/
-║  Terminal:      http://{local_ip}:{port}/terminal
-║  Hooks:         http://{local_ip}:{port}/hooks
-║  Auth Method:   {config['auth']['method']}
-║  Backend:       {backend.name}
-║  ntfy prefix:   {ntfy_prefix}-<session>
-╠═══════════════════════════════════════════════════════════╣
-║  Backends:  tmux: {tmux_status:<12}  a11y: {accessibility_status:<15}  ║
-║  Hooks:     Run ./hooks/install.sh to configure             ║
-╚═══════════════════════════════════════════════════════════╝
-    """)
+    # Build banner with proper alignment
+    box_width = 59  # inner width
+    url_base = f"http://{local_ip}:{port}"
+
+    lines = [
+        f"Control Panel: {url_base}/",
+        f"Terminal:      {url_base}/terminal",
+        f"Hooks:         {url_base}/hooks",
+        f"Auth Method:   {config['auth']['method']}",
+        f"Backend:       {backend.name}",
+        f"ntfy prefix:   {ntfy_prefix}-<session>",
+    ]
+
+    print("╔" + "═" * box_width + "╗")
+    print("║" + "Claude Code Remote Control Server".center(box_width) + "║")
+    print("╠" + "═" * box_width + "╣")
+    for line in lines:
+        print(f"║  {line:<{box_width - 2}}║")
+    print("╠" + "═" * box_width + "╣")
+    print(f"║  Backends:  tmux: {tmux_status:<12}  a11y: {accessibility_status:<13}║")
+    print(f"║  Hooks:     Run ./hooks/install.sh to configure{' ' * 12}║")
+    print("╚" + "═" * box_width + "╝")
 
     if sessions:
         print(f"[{backend.name}] Found {len(sessions)} session(s): {', '.join(sessions)}")
