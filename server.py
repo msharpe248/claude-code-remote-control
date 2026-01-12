@@ -516,7 +516,14 @@ class AccessibilityBackend(TerminalBackend):
     def get_content(self, session: str) -> str:
         """Get terminal content for a session."""
         self._refresh_terminals()
+        # Try exact match first
         content = self._terminals_cache.get(session, "")
+        if not content:
+            # Try normalized TTY (ttys006 -> s006)
+            normalized = session
+            if session.startswith('tty'):
+                normalized = session[3:]
+            content = self._terminals_cache.get(normalized, "")
         log.debug(f"[accessibility] get_content('{session}'): cache keys={list(self._terminals_cache.keys())}, content_len={len(content)}")
         return content
 
