@@ -26,6 +26,7 @@ import hashlib
 import logging
 import requests
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
@@ -651,16 +652,37 @@ sock = Sock(app)
 class SessionState:
     def __init__(self, session_name):
         self.session_name = session_name
-        self.last_prompt = None
-        self.last_prompt_signature = None  # Hash of key prompt elements
-        self.last_prompt_time = None
         self.last_notification_time = 0
-        self.notified_for_current = False  # Track if we've notified for current prompt
-        self.pending_prompts = []
-        self.prompt_history = []
-        self.parsed_options = []
         self.is_compacting = False  # Claude is compacting conversation
         self.compacting_started_at = 0  # When compacting was detected (for minimum display time)
+        # Note: prompt detection fields removed - using hooks instead
+
+@dataclass
+class HookEvent:
+    """Represents a Claude Code hook event."""
+    timestamp: datetime
+    event_type: str        # Stop, PreToolUse, PostToolUse, Notification, etc.
+    session_id: str
+    tool_name: Optional[str] = None
+    tool_input: Optional[Dict] = None
+    tool_result: Optional[str] = None
+    reason: Optional[str] = None
+    raw_data: Optional[Dict] = None
+    permission_mode: Optional[str] = None  # 'ask' if tool requires permission
+
+    def to_dict(self):
+        """Convert to JSON-serializable dict."""
+        return {
+            'timestamp': self.timestamp.isoformat(),
+            'event_type': self.event_type,
+            'session_id': self.session_id,
+            'tool_name': self.tool_name,
+            'tool_input': self.tool_input,
+            'tool_result': self.tool_result[:500] if self.tool_result and len(self.tool_result) > 500 else self.tool_result,
+            'reason': self.reason,
+            'permission_mode': self.permission_mode,
+        }
+
 
 class GlobalState:
     def __init__(self):
@@ -672,19 +694,52 @@ class GlobalState:
         # Start paused if mode is "standby"
         self.notifications_paused = (self.notification_mode == 'standby')
 
+        # Hook events storage
+        self.hook_events: List[HookEvent] = []  # Recent hook events (max 500)
+        self.hook_clients: List = []  # WebSocket clients for hook updates
+
     def get_session(self, session_name):
         """Get or create session state."""
         if session_name not in self.sessions:
             self.sessions[session_name] = SessionState(session_name)
         return self.sessions[session_name]
 
-    def get_all_pending(self):
-        """Get all pending prompts across all sessions."""
-        all_pending = []
-        for session_name, session_state in self.sessions.items():
-            for prompt in session_state.pending_prompts:
-                all_pending.append({**prompt, 'session': session_name})
-        return all_pending
+    # get_all_pending removed - using hooks instead
+
+    def add_hook_event(self, event: HookEvent):
+        """Add a hook event and broadcast to WebSocket clients."""
+        self.hook_events.append(event)
+        # Keep only last 500 events
+        if len(self.hook_events) > 500:
+            self.hook_events = self.hook_events[-500:]
+        # Broadcast to all connected clients
+        self.broadcast_hook_event(event)
+
+    def broadcast_hook_event(self, event: HookEvent):
+        """Send hook event to all connected WebSocket clients."""
+        event_json = json.dumps(event.to_dict())
+        log.info(f"[hooks-ws] Broadcasting to {len(self.hook_clients)} clients: {event.event_type} / {event.tool_name}")
+        dead_clients = []
+        for client in self.hook_clients:
+            try:
+                client.send(event_json)
+                log.info(f"[hooks-ws] Sent to client successfully")
+            except Exception as e:
+                log.info(f"[hooks-ws] Failed to send to client: {e}")
+                dead_clients.append(client)
+        # Remove dead clients
+        for client in dead_clients:
+            if client in self.hook_clients:
+                self.hook_clients.remove(client)
+
+    def get_hook_events(self, session_id: Optional[str] = None, event_type: Optional[str] = None, limit: int = 100):
+        """Get hook events with optional filtering."""
+        events = self.hook_events
+        if session_id:
+            events = [e for e in events if e.session_id == session_id]
+        if event_type:
+            events = [e for e in events if e.event_type == event_type]
+        return events[-limit:]
 
 state = GlobalState()
 
@@ -750,69 +805,8 @@ def check_ws_auth():
 # ============================================================================
 # Option Parsing
 # ============================================================================
-
-def parse_numbered_options(content):
-    """Parse numbered options from prompt content."""
-    options = []
-
-    # Pattern: "1. Option text" or "1) Option text" or "[1] Option text"
-    # Allow for selection markers like › ❯ > * at the start
-    patterns = [
-        r'^[›❯>\*\s]*(\d+)\.\s+(.+?)$',      # 1. Option (with optional selection marker)
-        r'^[›❯>\*\s]*(\d+)\)\s+(.+?)$',      # 1) Option
-        r'^[›❯>\*\s]*\[(\d+)\]\s+(.+?)$',    # [1] Option
-    ]
-
-    lines = content.split('\n')
-    for line in lines:
-        for pattern in patterns:
-            match = re.match(pattern, line.strip())
-            if match:
-                num = match.group(1)
-                text = match.group(2).strip()
-                # Truncate long options for display
-                if len(text) > 50:
-                    text = text[:47] + "..."
-                options.append({'num': num, 'text': text})
-                break
-
-    return options
-
-
-def parse_idle_default_text(content):
-    """Parse the default text from an idle prompt input line.
-
-    The idle prompt looks like:
-        > some default text           ↵send
-
-    Returns the text between > and ↵send (or end of line if no ↵send).
-    """
-    if not content:
-        return None
-
-    lines = content.strip().split('\n')
-
-    # Look for the input line with > prompt, searching from bottom
-    for line in reversed(lines):
-        stripped = line.strip()
-        # Match line starting with > (the input prompt)
-        if stripped.startswith('>'):
-            # Get everything after the >
-            text = stripped[1:].strip()
-            # Remove ↵send or similar send indicators if present
-            text = re.sub(r'\s*↵\s*send\s*$', '', text, flags=re.IGNORECASE)
-            text = re.sub(r'\s*↵send\s*$', '', text)
-            # Also remove any trailing whitespace
-            text = text.strip()
-            if text:
-                return text
-            # Found the > prompt but no text - return None
-            return None
-
-    return None
-
-# ============================================================================
 # Notification Backends
+# (parse_numbered_options and parse_idle_default_text removed - using hooks)
 # ============================================================================
 
 def get_local_ip():
@@ -965,89 +959,8 @@ def send_notification(message, title=None, options=None, session=None):
     send_pushover(message, title)
 
 # ============================================================================
-# Terminal Watcher
+# Terminal Watcher (simplified - only compacting detection, prompts use hooks)
 # ============================================================================
-
-def extract_prompt_signature(lines, prompt_type):
-    """Extract a stable signature from prompt content.
-
-    The signature should identify THIS specific prompt, ignoring
-    things that change like cursor position or timestamps.
-    """
-    # For idle prompts, use a fixed signature since all idle states are equivalent
-    # (Claude is ready for input - the surrounding terminal content doesn't matter)
-    if prompt_type == 'idle':
-        return "idle_ready"
-
-    # For question prompts, extract the actual question content
-    # Find the key identifying lines - the question/prompt text
-    key_lines = []
-    for line in lines:
-        line_stripped = line.strip()
-        # Skip empty lines and navigation hints
-        if not line_stripped:
-            continue
-        if line_stripped in ('Esc to cancel', '? for shortcuts'):
-            continue
-        if 'Enter to select' in line_stripped:
-            continue
-        if 'Tab/Arrow keys' in line_stripped:
-            continue
-        # Skip lines that are just UI chrome
-        if line_stripped.startswith('╭') or line_stripped.startswith('╰'):
-            continue
-        if line_stripped.startswith('│') and len(line_stripped) < 5:
-            continue
-        # Include numbered options and question text
-        key_lines.append(line_stripped)
-
-    # Create signature from type + key content
-    sig_content = f"{prompt_type}:" + "|".join(key_lines[-6:])  # Last 6 key lines
-    return hashlib.md5(sig_content.encode()).hexdigest()[:12]
-
-
-def detect_prompt(content):
-    """Check if content indicates Claude is waiting for input.
-
-    Returns: (is_prompt, context, prompt_type, signature)
-        prompt_type: 'question' (has options), 'idle' (main input), or None
-        signature: stable hash identifying this specific prompt
-    """
-    if not content:
-        return False, None, None, None
-
-    lines = content.strip().split('\n')
-    if not lines:
-        return False, None, None, None
-
-    recent_lines = [l for l in lines[-15:] if l.strip()]
-    if not recent_lines:
-        return False, None, None, None
-
-    # Check if Claude is busy (spinner active) - if so, ignore everything
-    # The spinner line contains "esc to interrupt" or similar
-    for line in recent_lines[-3:]:  # Check last few lines for spinner
-        line_lower = line.lower()
-        if "esc to interrupt" in line_lower or "to interrupt" in line_lower:
-            return False, None, None, None
-
-    recent_text = '\n'.join(recent_lines[-8:])
-
-    # Check for any prompt with "Esc to cancel" - covers all question types
-    # (AskUserQuestion, edit confirmations, etc.)
-    if "Esc to cancel" in recent_text:
-        context = recent_text
-        signature = extract_prompt_signature(recent_lines[-8:], 'question')
-        return True, context, 'question', signature
-
-    # Check for main input prompt (idle, waiting for next instruction)
-    # Has "↵send" or "? for shortcuts" visible
-    if "send" in recent_text and "? for shortcuts" in recent_text:
-        context = recent_text
-        signature = extract_prompt_signature(recent_lines[-8:], 'idle')
-        return True, context, 'idle', signature
-
-    return False, None, None, None
 
 def detect_compacting(content):
     """Check if Claude is compacting the conversation."""
@@ -1094,11 +1007,10 @@ def watcher_loop():
 
             for session_name in sessions:
                 content = backend.get_content(session_name)
-                is_prompt, context, prompt_type, signature = detect_prompt(content)
-
                 session_state = state.get_session(session_name)
 
                 # Check for compacting state (with minimum 3s display time)
+                # This is still terminal-based since there's no hook for compacting
                 is_compacting_now = detect_compacting(content)
                 now = time.time()
 
@@ -1114,80 +1026,7 @@ def watcher_loop():
                         session_state.is_compacting = False
                         log.info(f"[{session_name}] Compacting done")
 
-                if is_prompt:
-                    # Check if this is a NEW prompt (different signature)
-                    # For question prompts: only treat as new if there was no active prompt
-                    # This prevents re-detection when user is typing their answer
-                    if prompt_type == 'question' and session_state.last_prompt_signature is not None:
-                        # Already have an active question prompt - user is probably typing
-                        # Just update context but don't treat as new
-                        session_state.last_prompt = context
-                        is_new_prompt = False
-                    else:
-                        is_new_prompt = (signature != session_state.last_prompt_signature)
-
-                    if is_new_prompt:
-                        # New prompt detected
-                        session_state.last_prompt = context
-                        session_state.last_prompt_signature = signature
-                        session_state.last_prompt_time = datetime.now()
-                        session_state.notified_for_current = False  # Reset notification flag
-
-                        # Parse numbered options (only relevant for question prompts)
-                        # Use context (recent prompt area) not full content (terminal history)
-                        idle_default_text = None
-                        if prompt_type == 'question':
-                            session_state.parsed_options = parse_numbered_options(context)
-                        elif prompt_type == 'idle':
-                            session_state.parsed_options = []
-                            # Extract default text from idle prompt line (e.g., "> ok, restarted")
-                            idle_default_text = parse_idle_default_text(context)
-                        else:
-                            session_state.parsed_options = []
-
-                        prompt_info = {
-                            'context': context,
-                            'time': session_state.last_prompt_time.isoformat(),
-                            'id': len(session_state.prompt_history),
-                            'options': session_state.parsed_options,
-                            'type': prompt_type,
-                            'session': session_name,
-                            'signature': signature,
-                            'idle_default': idle_default_text
-                        }
-
-                        session_state.pending_prompts.append(prompt_info)
-                        session_state.prompt_history.append(prompt_info)
-
-                        if len(session_state.prompt_history) > 100:
-                            session_state.prompt_history = session_state.prompt_history[-100:]
-
-                        log.info(f"[{session_name}] NEW prompt detected! Type: {prompt_type}, Sig: {signature}")
-                        log.debug(f"[{session_name}] Context:\n{context}")
-
-                    # Only notify if we haven't already for this prompt
-                    if not session_state.notified_for_current:
-                        session_state.notified_for_current = True
-
-                        if prompt_type == 'idle':
-                            send_notification(
-                                "Claude is ready for your next instruction.",
-                                title=f"Claude Ready [{session_name}]",
-                                options=[],
-                                session=session_name
-                            )
-                        else:
-                            send_notification(
-                                f"Claude needs your input:\n\n{context[:200]}",
-                                options=session_state.parsed_options,
-                                session=session_name
-                            )
-                else:
-                    # No prompt detected - reset state so we can detect next prompt
-                    if session_state.last_prompt_signature is not None:
-                        log.info(f"[{session_name}] Prompt answered/cleared (was: {session_state.last_prompt_signature})")
-                        session_state.last_prompt_signature = None
-                        session_state.notified_for_current = False
+                # Note: Prompt detection removed - using hooks instead
 
             time.sleep(interval)
 
@@ -1324,6 +1163,44 @@ def terminal_websocket(ws):
             os.close(master_fd)
             os.kill(pid, signal.SIGTERM)
             os.waitpid(pid, 0)
+
+
+@sock.route('/ws/hooks')
+def hooks_websocket(ws):
+    """WebSocket endpoint for real-time hook events."""
+    if not check_ws_auth():
+        ws.close(1008, "Unauthorized")
+        return
+
+    # Register this client
+    state.hook_clients.append(ws)
+    log.info(f"[hooks-ws] Client connected ({len(state.hook_clients)} total)")
+
+    # Send recent events to catch up
+    recent_events = state.get_hook_events(limit=50)
+    for event in recent_events:
+        try:
+            ws.send(json.dumps(event.to_dict()))
+        except Exception:
+            break
+
+    try:
+        # Keep connection alive and wait for close
+        while True:
+            try:
+                msg = ws.receive(timeout=30)
+                if msg is None:
+                    break
+                # Handle ping/pong or other messages if needed
+                if msg == 'ping':
+                    ws.send('pong')
+            except Exception:
+                break
+    finally:
+        if ws in state.hook_clients:
+            state.hook_clients.remove(ws)
+        log.info(f"[hooks-ws] Client disconnected ({len(state.hook_clients)} total)")
+
 
 # ============================================================================
 # Web Interface
@@ -1558,19 +1435,7 @@ MAIN_TEMPLATE = """
             color: #888;
         }
 
-        .prompt-box {
-            background: #0d0d1a;
-            border-radius: 8px;
-            padding: 1rem;
-            margin-bottom: 1rem;
-            font-family: 'SF Mono', 'Monaco', 'Inconsolata', monospace;
-            font-size: 0.85rem;
-            white-space: pre-wrap;
-            word-break: break-word;
-            max-height: 250px;
-            overflow-y: auto;
-            border: 1px solid #333;
-        }
+        /* .prompt-box removed - using hook-based panels instead */
 
         .actions { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.5rem; margin-bottom: 1rem; }
         .actions.two-col { grid-template-columns: repeat(2, 1fr); }
@@ -1622,26 +1487,7 @@ MAIN_TEMPLATE = """
         }
         @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
 
-        .option-btn {
-            background: #374151;
-            color: white;
-            flex-direction: row;
-            gap: 0.5rem;
-            padding: 0.75rem;
-            text-align: left;
-            justify-content: flex-start;
-        }
-        .option-btn .btn-num {
-            background: #6366f1;
-            border-radius: 4px;
-            padding: 0.25rem 0.5rem;
-            font-size: 0.9rem;
-        }
-        .option-btn .btn-label {
-            font-size: 0.85rem;
-            opacity: 1;
-            margin: 0;
-        }
+        /* .option-btn removed - using hook-based panels instead */
 
         .session-tabs {
             display: flex;
@@ -1676,6 +1522,412 @@ MAIN_TEMPLATE = """
             align-items: center;
             justify-content: center;
         }
+
+        .nav-links {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 1rem;
+            flex-wrap: wrap;
+        }
+        .nav-links a {
+            color: #60a5fa;
+            text-decoration: none;
+            padding: 0.5rem 1rem;
+            background: #0d0d1a;
+            border-radius: 6px;
+            font-size: 0.9rem;
+        }
+        .nav-links a:hover { background: #1a1a3e; }
+        .nav-links a.active {
+            background: #6366f1;
+            color: white;
+        }
+
+        /* Rich Question UI from Hook Events */
+        .hook-question-panel {
+            display: none;
+            background: linear-gradient(135deg, #1e1e3f 0%, #2d1f3d 100%);
+            border: 1px solid #6366f1;
+            border-radius: 12px;
+            padding: 1.25rem;
+            margin-bottom: 1rem;
+            box-shadow: 0 4px 20px rgba(99, 102, 241, 0.2);
+        }
+        .hook-question-panel.active {
+            display: block;
+            animation: slideIn 0.3s ease;
+        }
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateY(-10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .hook-question-header {
+            display: inline-block;
+            background: #6366f1;
+            color: white;
+            padding: 0.25rem 0.75rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 0.75rem;
+        }
+        .hook-question-text {
+            font-size: 1.1rem;
+            color: #fff;
+            margin-bottom: 1rem;
+            line-height: 1.4;
+        }
+        .hook-question-options {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+        .hook-option-btn {
+            display: flex;
+            align-items: flex-start;
+            gap: 0.75rem;
+            background: rgba(255,255,255,0.05);
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 8px;
+            padding: 0.875rem 1rem;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            text-align: left;
+        }
+        .hook-option-btn:hover {
+            background: rgba(99, 102, 241, 0.2);
+            border-color: #6366f1;
+            transform: translateX(4px);
+        }
+        .hook-option-num {
+            background: #6366f1;
+            color: white;
+            min-width: 28px;
+            height: 28px;
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 600;
+            font-size: 0.9rem;
+            flex-shrink: 0;
+        }
+        .hook-option-content {
+            flex: 1;
+        }
+        .hook-option-label {
+            color: #fff;
+            font-weight: 500;
+            font-size: 0.95rem;
+            margin-bottom: 0.25rem;
+        }
+        .hook-option-desc {
+            color: #9ca3af;
+            font-size: 0.8rem;
+            line-height: 1.3;
+        }
+        .hook-question-meta {
+            margin-top: 0.75rem;
+            font-size: 0.7rem;
+            color: #666;
+        }
+        .hook-question-source {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.25rem;
+            background: rgba(34, 197, 94, 0.2);
+            color: #4ade80;
+            padding: 0.15rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.7rem;
+        }
+        .hook-question-other {
+            display: flex;
+            gap: 0.5rem;
+            margin-top: 0.75rem;
+            padding-top: 0.75rem;
+            border-top: 1px solid rgba(255,255,255,0.1);
+        }
+        .hook-question-other input {
+            flex: 1;
+            padding: 0.75rem 1rem;
+            border: 1px solid rgba(255,255,255,0.2);
+            border-radius: 8px;
+            background: rgba(255,255,255,0.05);
+            color: #fff;
+            font-size: 0.95rem;
+        }
+        .hook-question-other input:focus {
+            outline: none;
+            border-color: #6366f1;
+            background: rgba(99, 102, 241, 0.1);
+        }
+        .hook-question-other input::placeholder {
+            color: #666;
+        }
+        .hook-question-other button {
+            padding: 0.75rem 1.25rem;
+            border: none;
+            border-radius: 8px;
+            background: #6366f1;
+            color: white;
+            font-weight: 500;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .hook-question-other button:hover {
+            background: #4f46e5;
+        }
+        .hook-question-actions {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 1rem;
+            padding-top: 0.75rem;
+            border-top: 1px solid rgba(255,255,255,0.1);
+        }
+        .hook-question-escape {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.5rem 1rem;
+            border: 1px solid #ef4444;
+            border-radius: 6px;
+            background: transparent;
+            color: #ef4444;
+            font-size: 0.85rem;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .hook-question-escape:hover {
+            background: rgba(239, 68, 68, 0.2);
+        }
+
+        /* Tool Permission Dialog */
+        .permission-panel {
+            display: none;
+            background: linear-gradient(135deg, #1e2a1e 0%, #2d3a2d 100%);
+            border: 1px solid #22c55e;
+            border-radius: 12px;
+            padding: 1.25rem;
+            margin-bottom: 1rem;
+            box-shadow: 0 4px 20px rgba(34, 197, 94, 0.2);
+        }
+        .permission-panel.active {
+            display: block;
+            animation: slideIn 0.3s ease;
+        }
+        .permission-header {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            margin-bottom: 1rem;
+        }
+        .permission-icon {
+            font-size: 1.5rem;
+        }
+        .permission-title {
+            font-size: 1rem;
+            color: #fff;
+            font-weight: 500;
+        }
+        .permission-tool {
+            color: #4ade80;
+            font-family: 'SF Mono', Monaco, monospace;
+        }
+        .permission-detail {
+            background: rgba(0,0,0,0.3);
+            border-radius: 8px;
+            padding: 0.75rem;
+            margin-bottom: 1rem;
+            max-height: 200px;
+            overflow-y: auto;
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 0.8rem;
+            color: #ccc;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+        .permission-options {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+        .permission-btn {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            padding: 0.75rem 1rem;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            text-align: left;
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+        .permission-btn.yes {
+            background: rgba(34, 197, 94, 0.2);
+            border-color: rgba(34, 197, 94, 0.3);
+            color: #4ade80;
+        }
+        .permission-btn.yes:hover {
+            background: rgba(34, 197, 94, 0.3);
+            border-color: #22c55e;
+        }
+        .permission-btn.yes-all {
+            background: rgba(59, 130, 246, 0.2);
+            border-color: rgba(59, 130, 246, 0.3);
+            color: #60a5fa;
+        }
+        .permission-btn.yes-all:hover {
+            background: rgba(59, 130, 246, 0.3);
+            border-color: #3b82f6;
+        }
+        .permission-btn.no {
+            background: rgba(239, 68, 68, 0.15);
+            border-color: rgba(239, 68, 68, 0.3);
+            color: #f87171;
+        }
+        .permission-btn.no:hover {
+            background: rgba(239, 68, 68, 0.25);
+            border-color: #ef4444;
+        }
+        .permission-btn-num {
+            min-width: 24px;
+            height: 24px;
+            border-radius: 4px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 600;
+            font-size: 0.85rem;
+            background: rgba(255,255,255,0.1);
+        }
+        .permission-btn-text {
+            flex: 1;
+        }
+        .permission-btn-hint {
+            font-size: 0.75rem;
+            color: #888;
+        }
+        .permission-extra-input {
+            display: none;
+            margin-top: 0.5rem;
+            padding-left: 2.5rem;
+        }
+        .permission-extra-input.active {
+            display: flex;
+            gap: 0.5rem;
+        }
+        .permission-extra-input input {
+            flex: 1;
+            padding: 0.6rem 0.75rem;
+            border: 1px solid rgba(34, 197, 94, 0.3);
+            border-radius: 6px;
+            background: rgba(0,0,0,0.3);
+            color: #fff;
+            font-size: 0.9rem;
+        }
+        .permission-extra-input input:focus {
+            outline: none;
+            border-color: #22c55e;
+        }
+        .permission-extra-input button {
+            padding: 0.6rem 1rem;
+            border: none;
+            border-radius: 6px;
+            background: #22c55e;
+            color: #000;
+            font-weight: 500;
+            cursor: pointer;
+        }
+        .permission-extra-input button:hover {
+            background: #16a34a;
+        }
+        .permission-meta {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 0.75rem;
+            padding-top: 0.5rem;
+            border-top: 1px solid rgba(255,255,255,0.1);
+            font-size: 0.7rem;
+            color: #666;
+        }
+
+        /* Idle/Ready Panel - shown when Claude is waiting for new instructions */
+        .idle-panel {
+            display: none;
+            background: linear-gradient(135deg, rgba(59, 130, 246, 0.15) 0%, rgba(37, 99, 235, 0.1) 100%);
+            border: 1px solid rgba(59, 130, 246, 0.3);
+            border-radius: 12px;
+            padding: 1.25rem;
+            margin-bottom: 1rem;
+        }
+        .idle-panel.active {
+            display: block;
+        }
+        .idle-header {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            margin-bottom: 0.75rem;
+        }
+        .idle-icon {
+            font-size: 1.5rem;
+        }
+        .idle-title {
+            font-weight: 600;
+            color: #60a5fa;
+            font-size: 1.1rem;
+        }
+        .idle-reason {
+            font-size: 0.85rem;
+            color: #94a3b8;
+            margin-bottom: 1rem;
+            padding: 0.5rem;
+            background: rgba(0,0,0,0.2);
+            border-radius: 6px;
+        }
+        .idle-input-group {
+            display: flex;
+            gap: 0.5rem;
+        }
+        .idle-input-group input {
+            flex: 1;
+            padding: 0.75rem 1rem;
+            border: 1px solid rgba(59, 130, 246, 0.3);
+            border-radius: 8px;
+            background: rgba(0,0,0,0.3);
+            color: #fff;
+            font-size: 1rem;
+        }
+        .idle-input-group input:focus {
+            outline: none;
+            border-color: #3b82f6;
+            box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
+        }
+        .idle-input-group button {
+            padding: 0.75rem 1.5rem;
+            border: none;
+            border-radius: 8px;
+            background: #3b82f6;
+            color: #fff;
+            font-weight: 600;
+            cursor: pointer;
+            font-size: 1rem;
+        }
+        .idle-input-group button:hover {
+            background: #2563eb;
+        }
+        .idle-meta {
+            display: flex;
+            justify-content: flex-end;
+            margin-top: 0.75rem;
+            font-size: 0.7rem;
+            color: #666;
+        }
     </style>
 </head>
 <body>
@@ -1689,6 +1941,13 @@ MAIN_TEMPLATE = """
     <div id="refresh-indicator" title="Auto-refreshing"></div>
     <div class="container">
         <h1>Claude Remote Control</h1>
+
+        <nav class="nav-links">
+            <a href="/" class="active">Control</a>
+            <a href="/terminal?session={{ session }}">Terminal</a>
+            <a href="/history">History</a>
+            <a href="/hooks">Hooks</a>
+        </nav>
 
         {% if sessions|length > 1 %}
         <div class="session-tabs">
@@ -1707,66 +1966,93 @@ MAIN_TEMPLATE = """
                 <span class="brain-icon">🧠</span>
                 <strong>Compacting conversation...</strong>
             </div>
-            {% elif pending_prompts %}
-            <div class="status waiting">
-                <strong>Waiting for input!</strong>
-            </div>
             {% else %}
-            <div class="status idle">
-                <strong>Claude is working...</strong>
+            <div id="status-working" class="status idle"{% if is_idle %} style="display: none;"{% endif %}>
+                <strong>Watching for Claude activity...</strong>
             </div>
             {% endif %}
         </div>
 
-        {% if pending_prompts %}
-        <div class="prompt-box">{{ pending_prompts[-1].context }}</div>
-        {% else %}
-        <div class="prompt-box">{{ last_content or 'No recent activity' }}</div>
-        {% endif %}
-
-        {% if options %}
-        <h3>Detected Options</h3>
-        <div class="actions two-col">
-            {% for opt in options %}
-            <button class="btn option-btn" onclick="handleOption('{{ opt.num }}', '{{ opt.text | e }}')">
-                <span class="btn-num">{{ opt.num }}</span>
-                <span class="btn-label">{{ opt.text }}</span>
-            </button>
-            {% endfor %}
+        <!-- Rich Question Panel (populated via WebSocket from hook events) -->
+        <div id="hook-question-panel" class="hook-question-panel">
+            <div id="hook-question-header" class="hook-question-header"></div>
+            <div id="hook-question-text" class="hook-question-text"></div>
+            <div id="hook-question-options" class="hook-question-options"></div>
+            <div class="hook-question-other">
+                <input type="text" id="hook-other-input" placeholder="Or type your own response...">
+                <button onclick="sendHookOtherInput()">Send</button>
+            </div>
+            <div class="hook-question-actions">
+                <span class="hook-question-source">Via Hook Event</span>
+                <button class="hook-question-escape" onclick="cancelHookQuestion()">
+                    <span>⎋</span> Cancel
+                </button>
+            </div>
         </div>
-        {% endif %}
 
-        {% if pending_prompts and pending_prompts[-1].type == 'idle' %}
-        <h3>Quick Actions</h3>
-        <div class="actions">
-            {% if pending_prompts[-1].idle_default %}
-            <button class="btn btn-primary" onclick="sendInput('')" style="flex: 2;">
-                <span class="btn-num">↵</span>
-                <span class="btn-label">Send: {{ pending_prompts[-1].idle_default[:30] }}{% if pending_prompts[-1].idle_default|length > 30 %}...{% endif %}</span>
-            </button>
-            {% endif %}
-            <button class="btn btn-secondary" onclick="promptAndSendIdle()">
-                <span class="btn-num">✎</span>
-                <span class="btn-label">Type something</span>
-            </button>
+        <!-- Tool Permission Panel -->
+        <div id="permission-panel" class="permission-panel">
+            <div class="permission-header">
+                <span class="permission-icon">🔐</span>
+                <span class="permission-title">Permission required for <span id="permission-tool" class="permission-tool"></span></span>
+            </div>
+            <div id="permission-detail" class="permission-detail"></div>
+            <div class="permission-options">
+                <button class="permission-btn yes" onclick="handlePermission('yes')">
+                    <span class="permission-btn-num">1</span>
+                    <span class="permission-btn-text">Yes</span>
+                    <span class="permission-btn-hint">Tab to add instructions</span>
+                </button>
+                <div id="permission-extra-input" class="permission-extra-input">
+                    <input type="text" id="permission-extra-text" placeholder="Additional instructions for Claude...">
+                    <button onclick="sendPermissionWithText()">Send</button>
+                </div>
+                <button class="permission-btn yes-all" onclick="handlePermission('yes-all')">
+                    <span class="permission-btn-num">2</span>
+                    <span class="permission-btn-text">Yes, allow all this session</span>
+                    <span class="permission-btn-hint">shift+tab</span>
+                </button>
+                <button class="permission-btn no" onclick="handlePermission('no')">
+                    <span class="permission-btn-num">3</span>
+                    <span class="permission-btn-text">No</span>
+                </button>
+            </div>
+            <div class="permission-meta">
+                <span>Via Hook Event</span>
+                <button class="hook-question-escape" onclick="cancelPermission()">
+                    <span>⎋</span> Cancel
+                </button>
+            </div>
         </div>
-        {% else %}
-        <h3>Quick Actions</h3>
-        {% endif %}
+
+        <!-- Debug Panel - Shows received hook events -->
+        <div id="debug-panel" style="background: #2a2a4a; border: 1px solid #666; border-radius: 8px; padding: 10px; margin: 10px 0; font-size: 12px; max-height: 150px; overflow-y: auto;">
+            <strong style="color: #aaa;">Hook Events Debug:</strong>
+            <div id="debug-events" style="color: #8f8; font-family: monospace; white-space: pre-wrap;"></div>
+        </div>
+
+        <!-- Idle/Ready Panel (populated via WebSocket from Stop events) -->
+        <div id="idle-panel" class="idle-panel{% if is_idle %} active{% endif %}">
+            <div class="idle-header">
+                <span class="idle-icon">✨</span>
+                <span class="idle-title">Claude is ready for a new task</span>
+            </div>
+            <div id="idle-reason" class="idle-reason" style="display: none;"></div>
+            <div class="idle-input-group">
+                <input type="text" id="idle-input" placeholder="What would you like Claude to do?">
+                <button onclick="sendIdleInput()">Send</button>
+            </div>
+            <div class="idle-meta">
+                <span id="idle-meta-source">{% if is_idle %}Via Terminal Detection{% else %}Via Hook Event{% endif %}</span>
+            </div>
+        </div>
+
+        <!-- Fallback actions -->
         <div class="actions">
             <button class="btn btn-danger" onclick="sendEsc()">
                 <span class="btn-num">⎋</span>
-                <span class="btn-label">Cancel</span>
+                <span class="btn-label">Cancel/Interrupt</span>
             </button>
-        </div>
-
-        <div class="input-group">
-            <input type="text" id="custom-input" placeholder="Custom response...">
-            <button class="btn btn-primary" onclick="sendCustom()">Send</button>
-        </div>
-
-        <div class="actions two-col">
-            <a href="/terminal?session={{ session }}" class="btn btn-primary btn-full">Open Full Terminal</a>
         </div>
 
         <div class="links">
@@ -1777,8 +2063,7 @@ MAIN_TEMPLATE = """
                 {% if notifications_paused %}🔕 Notifications Paused{% else %}🔔 Notifications On{% endif %}
             </a>
             {% endif %}
-            <a href="/history">History</a>
-            <a href="/test-notify?session={{ session }}">Test</a>
+            <a href="/test-notify?session={{ session }}">Test Notify</a>
             <a href="/config">Config</a>
         </div>
 
@@ -1790,6 +2075,25 @@ MAIN_TEMPLATE = """
     <script>
         const currentSession = '{{ session }}';
         let userInteracting = false;  // Track if user is interacting (pauses auto-refresh)
+        let currentHookQuestion = null;  // Current AskUserQuestion being displayed
+        let currentPermissionEvent = null;  // Current tool permission prompt being displayed
+        let isClaudeIdle = {{ 'true' if is_idle else 'false' }};  // Track if Claude is idle
+
+        // Debug logging to visible panel
+        function debugLog(msg) {
+            const el = document.getElementById('debug-events');
+            if (el) {
+                const time = new Date().toLocaleTimeString();
+                el.textContent = '[' + time + '] ' + msg + '\\n' + el.textContent;
+                // Keep only last 20 lines
+                const lines = el.textContent.split('\\n').slice(0, 20);
+                el.textContent = lines.join('\\n');
+            }
+            console.log('[DEBUG]', msg);
+        }
+
+        // Immediate test - script is running
+        debugLog('Script started');
 
         function sendInput(text) {
             fetch('/send', {
@@ -1802,35 +2106,7 @@ MAIN_TEMPLATE = """
             });
         }
 
-        function handleOption(num, text) {
-            // Check if this is a "type something" / "other" option
-            const lowerText = text.toLowerCase();
-            if (lowerText.includes('type something') || lowerText.includes('other')) {
-                userInteracting = true;  // Pause auto-refresh
-                const customText = prompt('Enter your custom response:');
-                if (customText !== null && customText.trim() !== '') {
-                    // Prepend option number to custom text (e.g., "3hello world")
-                    const fullText = String(num) + customText;
-                    fetch('/send', {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({input: fullText, session: currentSession})
-                    }).then(r => r.json()).then(d => {
-                        userInteracting = false;
-                        if(d.success) location.reload();
-                        else alert('Error: ' + d.error);
-                    }).catch(e => {
-                        userInteracting = false;
-                        alert('Network error: ' + e);
-                    });
-                } else {
-                    userInteracting = false;
-                }
-            } else {
-                // Normal option - just send the number
-                sendInput(num);
-            }
-        }
+        // handleOption removed - using hook-based handleHookOption instead
 
         function sendCustom() {
             const input = document.getElementById('custom-input').value;
@@ -1869,15 +2145,15 @@ MAIN_TEMPLATE = """
             }
         }
 
-        document.getElementById('custom-input').addEventListener('keypress', e => {
-            if(e.key === 'Enter') sendCustom();
-        });
-
         // Smart auto-refresh: pause while user is typing or interacting
         const customInput = document.getElementById('custom-input');
-
-        customInput.addEventListener('focus', () => { userInteracting = true; });
-        customInput.addEventListener('blur', () => { userInteracting = false; });
+        if (customInput) {
+            customInput.addEventListener('keypress', e => {
+                if(e.key === 'Enter') sendCustom();
+            });
+            customInput.addEventListener('focus', () => { userInteracting = true; });
+            customInput.addEventListener('blur', () => { userInteracting = false; });
+        }
 
         function toggleNotifications() {
             fetch('/toggle-notifications', {
@@ -1899,10 +2175,11 @@ MAIN_TEMPLATE = """
 
         function scheduleRefresh() {
             setTimeout(() => {
-                if (!userInteracting && document.visibilityState === 'visible') {
+                // Don't refresh if user is interacting, page not visible, or a dialog is shown
+                if (!userInteracting && !currentHookQuestion && !currentPermissionEvent && !isClaudeIdle && document.visibilityState === 'visible') {
                     location.reload();
                 } else {
-                    // User is typing or page not visible, check again later
+                    // Check again later
                     scheduleRefresh();
                 }
             }, 5000);
@@ -1940,6 +2217,484 @@ MAIN_TEMPLATE = """
                 });
         }
         checkCompactingState();
+
+        // ============================================================
+        // Hook-based Question UI
+        // ============================================================
+        let hookWs = null;
+
+        function escapeHtml(str) {
+            if (!str) return '';
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
+        }
+
+        // Escape string for use inside JavaScript single-quoted strings
+        function escapeJs(str) {
+            if (!str) return '';
+            let result = '';
+            for (let i = 0; i < str.length; i++) {
+                const c = str[i];
+                if (c === String.fromCharCode(92)) result += String.fromCharCode(92, 92); // backslash
+                else if (c === String.fromCharCode(39)) result += String.fromCharCode(92, 39); // single quote
+                else if (c === String.fromCharCode(34)) result += String.fromCharCode(92, 34); // double quote
+                else if (c === String.fromCharCode(10)) result += String.fromCharCode(92, 110); // newline -> \n
+                else if (c === String.fromCharCode(13)) result += String.fromCharCode(92, 114); // carriage return -> \r
+                else result += c;
+            }
+            return result;
+        }
+
+        function showHookQuestion(questions) {
+            if (!questions || questions.length === 0) return;
+
+            // For now, handle the first question (multi-question support could be added)
+            const q = questions[0];
+            currentHookQuestion = q;
+
+            const panel = document.getElementById('hook-question-panel');
+            const headerEl = document.getElementById('hook-question-header');
+            const textEl = document.getElementById('hook-question-text');
+            const optionsEl = document.getElementById('hook-question-options');
+
+            headerEl.textContent = q.header || 'Question';
+            textEl.textContent = q.question || '';
+
+            // Build options HTML
+            let optionsHtml = '';
+            if (q.options && q.options.length > 0) {
+                q.options.forEach((opt, idx) => {
+                    const num = idx + 1;
+                    optionsHtml += `
+                        <button class="hook-option-btn" onclick="handleHookOption(${num}, '${escapeJs(opt.label)}')">
+                            <span class="hook-option-num">${num}</span>
+                            <div class="hook-option-content">
+                                <div class="hook-option-label">${escapeHtml(opt.label)}</div>
+                                ${opt.description ? `<div class="hook-option-desc">${escapeHtml(opt.description)}</div>` : ''}
+                            </div>
+                        </button>
+                    `;
+                });
+            }
+
+            optionsEl.innerHTML = optionsHtml;
+
+            // Clear the "Other" input field
+            document.getElementById('hook-other-input').value = '';
+
+            panel.classList.add('active');
+        }
+
+        function hideHookQuestion() {
+            const panel = document.getElementById('hook-question-panel');
+            panel.classList.remove('active');
+            currentHookQuestion = null;
+        }
+
+        function handleHookOption(num, label) {
+            // Send the option number to the terminal
+            sendInput(String(num));
+            hideHookQuestion();
+        }
+
+        function sendHookOtherInput() {
+            const input = document.getElementById('hook-other-input');
+            const customText = input.value.trim();
+            if (customText) {
+                // "Other" is the last option, so its number is options.length + 1
+                const otherNum = (currentHookQuestion?.options?.length || 0) + 1;
+                const fullText = String(otherNum) + customText;
+                fetch('/send', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({input: fullText, session: currentSession})
+                }).then(r => r.json()).then(d => {
+                    hideHookQuestion();
+                    if(d.success) location.reload();
+                    else alert('Error: ' + d.error);
+                }).catch(e => {
+                    alert('Network error: ' + e);
+                });
+            }
+        }
+
+        function cancelHookQuestion() {
+            // Send escape to cancel the question
+            fetch('/send-esc', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({session: currentSession})
+            }).then(r => r.json()).then(d => {
+                hideHookQuestion();
+                if(d.success) location.reload();
+                else alert('Error: ' + d.error);
+            });
+        }
+
+        // Handle Enter key in the "Other" input
+        const hookOtherEl = document.getElementById('hook-other-input');
+        if (hookOtherEl) {
+            hookOtherEl.addEventListener('keypress', e => {
+                if (e.key === 'Enter') sendHookOtherInput();
+            });
+            hookOtherEl.addEventListener('focus', () => { userInteracting = true; });
+            hookOtherEl.addEventListener('blur', () => { userInteracting = false; });
+        }
+
+        // ============================================================
+        // Tool Permission UI
+        // ============================================================
+
+        function showPermissionPanel(event) {
+            debugLog('>>> SHOWING PERMISSION PANEL for ' + event.tool_name);
+            currentPermissionEvent = event;
+            const panel = document.getElementById('permission-panel');
+            const toolEl = document.getElementById('permission-tool');
+            const detailEl = document.getElementById('permission-detail');
+
+            toolEl.textContent = event.tool_name || 'Unknown Tool';
+
+            // Format the tool input for display
+            let detailText = '';
+            if (event.tool_input) {
+                if (typeof event.tool_input === 'string') {
+                    detailText = event.tool_input;
+                } else {
+                    detailText = JSON.stringify(event.tool_input, null, 2);
+                }
+            }
+            detailEl.textContent = detailText || 'No details available';
+
+            // Reset the extra input state
+            document.getElementById('permission-extra-input').classList.remove('active');
+            document.getElementById('permission-extra-text').value = '';
+
+            panel.classList.add('active');
+        }
+
+        function hidePermissionPanel() {
+            document.getElementById('permission-panel').classList.remove('active');
+            document.getElementById('permission-extra-input').classList.remove('active');
+            currentPermissionEvent = null;
+        }
+
+        function handlePermission(action) {
+            if (action === 'yes') {
+                // Toggle the extra input area instead of sending immediately
+                const extraInput = document.getElementById('permission-extra-input');
+                if (!extraInput.classList.contains('active')) {
+                    extraInput.classList.add('active');
+                    document.getElementById('permission-extra-text').focus();
+                    return;
+                }
+                // If already active and user clicks Yes again, just send yes
+                sendInput('y');
+            } else if (action === 'yes-all') {
+                sendInput('2');
+            } else if (action === 'no') {
+                sendInput('n');
+            }
+            hidePermissionPanel();
+        }
+
+        function sendPermissionWithText() {
+            const extraText = document.getElementById('permission-extra-text').value.trim();
+            if (extraText) {
+                // Send Tab first to enable text input mode, then the text
+                // Actually, we need to send "1" + text after Tab was pressed
+                // The terminal expects: Tab (to switch mode), then type text, then Enter
+                // Since we can't simulate Tab easily, we send the text with "1" prefix
+                fetch('/send', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({input: '\t', session: currentSession})
+                }).then(() => {
+                    // Small delay then send the actual text
+                    setTimeout(() => {
+                        fetch('/send', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({input: extraText + '\\n', session: currentSession})
+                        }).then(r => r.json()).then(d => {
+                            hidePermissionPanel();
+                            if(d.success) location.reload();
+                            else alert('Error: ' + d.error);
+                        });
+                    }, 100);
+                });
+            } else {
+                // No text, just send yes
+                sendInput('y');
+                hidePermissionPanel();
+            }
+        }
+
+        function cancelPermission() {
+            fetch('/send-esc', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({session: currentSession})
+            }).then(r => r.json()).then(d => {
+                hidePermissionPanel();
+                if(d.success) location.reload();
+                else alert('Error: ' + d.error);
+            });
+        }
+
+        // Handle Enter key in permission extra input
+        const permExtraEl = document.getElementById('permission-extra-text');
+        if (permExtraEl) {
+            permExtraEl.addEventListener('keypress', e => {
+                if (e.key === 'Enter') sendPermissionWithText();
+            });
+            permExtraEl.addEventListener('focus', () => { userInteracting = true; });
+            permExtraEl.addEventListener('blur', () => { userInteracting = false; });
+        }
+
+        // ============================================================
+        // Idle/Ready Panel UI (for Stop events)
+        // ============================================================
+
+        function showIdlePanel(reason) {
+            debugLog('Showing idle panel' + (reason ? ': ' + reason : ''));
+            isClaudeIdle = true;
+            const panel = document.getElementById('idle-panel');
+            const reasonEl = document.getElementById('idle-reason');
+            const statusEl = document.getElementById('status-working');
+            const metaEl = document.getElementById('idle-meta-source');
+
+            if (reason) {
+                reasonEl.textContent = reason;
+                reasonEl.style.display = 'block';
+            } else {
+                reasonEl.style.display = 'none';
+            }
+
+            panel.classList.add('active');
+            if (statusEl) statusEl.style.display = 'none';
+            if (metaEl) metaEl.textContent = 'Via Hook Event';
+            document.getElementById('idle-input').value = '';
+            document.getElementById('idle-input').focus();
+        }
+
+        function hideIdlePanel() {
+            document.getElementById('idle-panel').classList.remove('active');
+            const statusEl = document.getElementById('status-working');
+            if (statusEl) {
+                statusEl.style.display = 'block';
+                statusEl.innerHTML = '<strong>Claude is working...</strong>';
+            }
+            isClaudeIdle = false;
+        }
+
+        function sendIdleInput() {
+            const input = document.getElementById('idle-input').value.trim();
+            if (!input) return;
+
+            fetch('/send', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({input: input, session: currentSession})
+            }).then(r => r.json()).then(d => {
+                hideIdlePanel();
+                if(d.success) {
+                    // Don't reload - let hooks show new state
+                } else {
+                    alert('Error: ' + d.error);
+                }
+            });
+        }
+
+        // Handle Enter key in idle input
+        const idleInputEl = document.getElementById('idle-input');
+        if (idleInputEl) {
+            idleInputEl.addEventListener('keypress', e => {
+                if (e.key === 'Enter') sendIdleInput();
+            });
+            idleInputEl.addEventListener('focus', () => { userInteracting = true; });
+            idleInputEl.addEventListener('blur', () => { userInteracting = false; });
+        }
+
+        function connectHookWebSocket() {
+            const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            hookWs = new WebSocket(`${protocol}//${location.host}/ws/hooks?session=${encodeURIComponent(currentSession)}`);
+
+            // Track state for detecting unanswered questions
+            let initialBatchEvents = [];
+            let initialBatchTimeout = null;
+            let isRealTime = false;
+
+            hookWs.onopen = () => {
+                console.log('Hook WebSocket connected');
+                debugLog('WS CONNECTED - waiting for initial batch...');
+                // After initial batch arrives, process it to find unanswered questions
+                initialBatchTimeout = setTimeout(() => {
+                    debugLog('Processing batch of ' + initialBatchEvents.length + ' events');
+                    processInitialBatch();
+                    isRealTime = true;
+                    debugLog('NOW IN REAL-TIME MODE');
+                    console.log('Hook WebSocket now in real-time mode');
+                }, 300);
+            };
+
+            function processInitialBatch() {
+                // Find if there's an unanswered AskUserQuestion
+                // Look for PreToolUse without a matching PostToolUse
+                const askEvents = initialBatchEvents.filter(e =>
+                    e.tool_name === 'AskUserQuestion'
+                );
+
+                // Get the last PreToolUse and last PostToolUse for AskUserQuestion
+                let lastAskPre = null;
+                let lastAskPost = null;
+                for (const e of askEvents) {
+                    if (e.event_type === 'PreToolUse') lastAskPre = e;
+                    if (e.event_type === 'PostToolUse') lastAskPost = e;
+                }
+
+                // If there's a PreToolUse that's newer than the last PostToolUse, show it
+                if (lastAskPre && (!lastAskPost || lastAskPre.timestamp > lastAskPost.timestamp)) {
+                    const toolInput = lastAskPre.tool_input;
+                    if (toolInput && toolInput.questions) {
+                        console.log('Found unanswered question from initial batch');
+                        showHookQuestion(toolInput.questions);
+                    }
+                }
+
+                // Also check for unanswered permission prompts
+                // These are PreToolUse events with any permission_mode and NOT AskUserQuestion
+                const permissionEvents = initialBatchEvents.filter(e =>
+                    e.tool_name !== 'AskUserQuestion' && e.permission_mode
+                );
+
+                // Find the most recent PreToolUse with permission_mode that doesn't have a PostToolUse
+                let lastPermPre = null;
+                let lastPermPost = null;
+                for (const e of permissionEvents) {
+                    if (e.event_type === 'PreToolUse') lastPermPre = e;
+                }
+                // Check for PostToolUse of the same tool
+                for (const e of initialBatchEvents) {
+                    if (e.event_type === 'PostToolUse' && lastPermPre && e.tool_name === lastPermPre.tool_name) {
+                        if (!lastPermPost || e.timestamp > lastPermPost.timestamp) {
+                            lastPermPost = e;
+                        }
+                    }
+                }
+
+                // If there's a permission PreToolUse newer than its PostToolUse, show it
+                debugLog('Batch check: lastPermPre=' + (lastPermPre ? lastPermPre.tool_name : 'null') + ', lastPermPost=' + (lastPermPost ? lastPermPost.tool_name : 'null'));
+                if (lastPermPre && (!lastPermPost || lastPermPre.timestamp > lastPermPost.timestamp)) {
+                    debugLog('Found unanswered permission prompt from batch: ' + lastPermPre.tool_name);
+                    showPermissionPanel(lastPermPre);
+                }
+
+                // Check for Stop event (Claude is idle)
+                // If the last event is Stop and there's no subsequent PreToolUse, show idle panel
+                const stopEvents = initialBatchEvents.filter(e => e.event_type === 'Stop');
+                const lastStop = stopEvents.length > 0 ? stopEvents[stopEvents.length - 1] : null;
+                if (lastStop) {
+                    // Check if there's a PreToolUse after this Stop
+                    const hasLaterPreToolUse = initialBatchEvents.some(e =>
+                        e.event_type === 'PreToolUse' && e.timestamp > lastStop.timestamp
+                    );
+                    if (!hasLaterPreToolUse) {
+                        debugLog('Found idle state from batch: ' + (lastStop.reason || 'no reason'));
+                        showIdlePanel(lastStop.reason);
+                    }
+                }
+
+                // Clear the batch
+                initialBatchEvents = [];
+            }
+
+            hookWs.onclose = () => {
+                console.log('Hook WebSocket disconnected, reconnecting...');
+                if (initialBatchTimeout) clearTimeout(initialBatchTimeout);
+                setTimeout(connectHookWebSocket, 3000);
+            };
+
+            hookWs.onerror = (e) => {
+                console.log('Hook WebSocket error:', e);
+            };
+
+            hookWs.onmessage = (e) => {
+                // Skip non-JSON messages (like 'pong' responses)
+                if (!e.data || !e.data.startsWith('{')) {
+                    debugLog('Non-JSON: ' + (e.data ? e.data.substring(0,20) : 'null'));
+                    return;
+                }
+
+                try {
+                    const event = JSON.parse(e.data);
+                    // Visible debug logging
+                    debugLog(`${event.event_type} | ${event.tool_name} | perm=${event.permission_mode} | rt=${isRealTime}`);
+                    console.log('Hook event:', event.event_type, event.tool_name, 'isRealTime:', isRealTime, 'permission_mode:', event.permission_mode);
+
+                    if (!isRealTime) {
+                        // Collecting initial batch
+                        initialBatchEvents.push(event);
+                        return;
+                    }
+
+                    // Real-time mode: process events immediately
+
+                    // Check for AskUserQuestion PreToolUse event
+                    if (event.event_type === 'PreToolUse' && event.tool_name === 'AskUserQuestion') {
+                        const toolInput = event.tool_input;
+                        if (toolInput && toolInput.questions) {
+                            showHookQuestion(toolInput.questions);
+                        }
+                    }
+
+                    // Check for permission-requiring PreToolUse events (not AskUserQuestion)
+                    // permission_mode can be 'ask', 'default', or other values - show panel for any non-null
+                    if (event.event_type === 'PreToolUse' &&
+                        event.tool_name !== 'AskUserQuestion' &&
+                        event.permission_mode) {
+                        debugLog('Showing permission panel for: ' + event.tool_name);
+                        showPermissionPanel(event);
+                    }
+
+                    // Hide question panel when we get a PostToolUse for AskUserQuestion
+                    if (event.event_type === 'PostToolUse' && event.tool_name === 'AskUserQuestion') {
+                        hideHookQuestion();
+                    }
+
+                    // Hide permission panel when we get a PostToolUse for the permission tool
+                    if (event.event_type === 'PostToolUse' && currentPermissionEvent &&
+                        event.tool_name === currentPermissionEvent.tool_name) {
+                        hidePermissionPanel();
+                    }
+
+                    // Show idle panel when Claude stops (ready for new input)
+                    if (event.event_type === 'Stop') {
+                        showIdlePanel(event.reason);
+                    }
+
+                    // Hide idle panel when Claude starts working (PreToolUse)
+                    if (event.event_type === 'PreToolUse' && isClaudeIdle) {
+                        hideIdlePanel();
+                    }
+
+                } catch (err) {
+                    console.error('Failed to parse hook event:', err);
+                }
+            };
+        }
+
+        // Start hook WebSocket connection
+        debugLog('About to connect WebSocket...');
+        connectHookWebSocket();
+        debugLog('connectHookWebSocket() called');
+
+        // Keep hook WebSocket alive
+        setInterval(() => {
+            if (hookWs && hookWs.readyState === WebSocket.OPEN) {
+                hookWs.send('ping');
+            }
+        }, 25000);
     </script>
 </body>
 </html>
@@ -1969,8 +2724,24 @@ TERMINAL_TEMPLATE = """
             align-items: center;
             border-bottom: 1px solid #333;
         }
-        .header h1 { font-size: 1rem; color: #ff6b6b; }
-        .header a { color: #60a5fa; text-decoration: none; font-size: 0.9rem; }
+        .header h1 { font-size: 1rem; color: #ff6b6b; margin: 0; }
+        .nav-links {
+            display: flex;
+            gap: 0.5rem;
+        }
+        .nav-links a {
+            color: #60a5fa;
+            text-decoration: none;
+            padding: 0.35rem 0.75rem;
+            background: #0d0d1a;
+            border-radius: 4px;
+            font-size: 0.8rem;
+        }
+        .nav-links a:hover { background: #1a1a3e; }
+        .nav-links a.active {
+            background: #6366f1;
+            color: white;
+        }
         #terminal-container {
             flex: 1;
             padding: 0.5rem;
@@ -2028,7 +2799,12 @@ TERMINAL_TEMPLATE = """
 <body>
     <div class="header">
         <h1>Terminal: {{ session }}{% if polling_mode %} ({{ backend_name }}){% endif %}</h1>
-        <a href="/">← Back</a>
+        <nav class="nav-links">
+            <a href="/">Control</a>
+            <a href="/terminal?session={{ session }}" class="active">Terminal</a>
+            <a href="/history">History</a>
+            <a href="/hooks">Hooks</a>
+        </nav>
     </div>
     <div id="terminal-container">
         {% if polling_mode %}
@@ -2217,8 +2993,29 @@ HISTORY_TEMPLATE = """
             background: #1a1a2e;
             color: #eee;
             padding: 1rem;
+            max-width: 1200px;
+            margin: 0 auto;
         }
-        h1 { color: #ff6b6b; margin-bottom: 1rem; }
+        h1 { color: #ff6b6b; margin-bottom: 0.5rem; }
+        .nav-links {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 1rem;
+            flex-wrap: wrap;
+        }
+        .nav-links a {
+            color: #60a5fa;
+            text-decoration: none;
+            padding: 0.5rem 1rem;
+            background: #0d0d1a;
+            border-radius: 6px;
+            font-size: 0.9rem;
+        }
+        .nav-links a:hover { background: #1a1a3e; }
+        .nav-links a.active {
+            background: #6366f1;
+            color: white;
+        }
         .prompt-item {
             background: #0d0d1a;
             border-radius: 8px;
@@ -2233,12 +3030,16 @@ HISTORY_TEMPLATE = """
             margin-top: 0.5rem;
             font-size: 0.85rem;
         }
-        a { color: #60a5fa; }
     </style>
 </head>
 <body>
     <h1>Prompt History</h1>
-    <p><a href="/">← Back</a></p>
+    <nav class="nav-links">
+        <a href="/">Control</a>
+        <a href="/terminal">Terminal</a>
+        <a href="/history" class="active">History</a>
+        <a href="/hooks">Hooks</a>
+    </nav>
     {% for p in history|reverse %}
     <div class="prompt-item">
         <div class="prompt-time">{{ p.time }}</div>
@@ -2252,9 +3053,599 @@ HISTORY_TEMPLATE = """
 </html>
 """
 
+HOOKS_TEMPLATE = """
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hook Events - Claude Remote Control</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            min-height: 100vh;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 1rem;
+        }
+        h1 { color: #ff6b6b; margin-bottom: 0.5rem; }
+        .nav-links {
+            display: flex;
+            gap: 1rem;
+            margin-bottom: 1rem;
+            flex-wrap: wrap;
+        }
+        .nav-links a {
+            color: #60a5fa;
+            text-decoration: none;
+            padding: 0.5rem 1rem;
+            background: #0d0d1a;
+            border-radius: 6px;
+        }
+        .nav-links a:hover { background: #1a1a3e; }
+        .nav-links a.active {
+            background: #6366f1;
+            color: white;
+        }
+        .status-bar {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            padding: 0.75rem 1rem;
+            background: #0d0d1a;
+            border-radius: 8px;
+            margin-bottom: 1rem;
+        }
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #4ade80;
+            animation: pulse 2s infinite;
+        }
+        .status-dot.disconnected { background: #f87171; animation: none; }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        .filter-bar {
+            display: flex;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+            margin-bottom: 1rem;
+        }
+        .filter-btn {
+            padding: 0.4rem 0.8rem;
+            border: 1px solid #333;
+            background: #0d0d1a;
+            color: #ccc;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.85rem;
+        }
+        .filter-btn:hover { border-color: #6366f1; }
+        .filter-btn.active {
+            background: #6366f1;
+            border-color: #6366f1;
+            color: white;
+        }
+        .events-table {
+            width: 100%;
+            background: #0d0d1a;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        .events-table table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        .events-table th {
+            text-align: left;
+            padding: 0.75rem 1rem;
+            background: #16162a;
+            color: #888;
+            font-weight: 500;
+            font-size: 0.85rem;
+            text-transform: uppercase;
+        }
+        .events-table td {
+            padding: 0.6rem 1rem;
+            border-top: 1px solid #222;
+            font-size: 0.9rem;
+        }
+        .events-table tr:hover { background: #16162a; }
+        .event-type {
+            display: inline-block;
+            padding: 0.2rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            font-weight: 500;
+        }
+        .event-type.Stop { background: #22c55e22; color: #4ade80; }
+        .event-type.PreToolUse { background: #3b82f622; color: #60a5fa; }
+        .event-type.PostToolUse { background: #6b728022; color: #9ca3af; }
+        .event-type.Notification { background: #f59e0b22; color: #fbbf24; }
+        .event-type.SessionStart { background: #8b5cf622; color: #a78bfa; }
+        .event-type.SessionEnd { background: #ef444422; color: #f87171; }
+        .event-type.UserPromptSubmit { background: #06b6d422; color: #22d3ee; }
+        .event-type.PreCompact { background: #d946ef22; color: #e879f9; }
+        .tool-name {
+            font-family: 'SF Mono', Monaco, monospace;
+            color: #fbbf24;
+        }
+        .session-id {
+            font-family: 'SF Mono', Monaco, monospace;
+            color: #888;
+            font-size: 0.8rem;
+        }
+        .timestamp {
+            color: #666;
+            font-size: 0.85rem;
+            font-family: 'SF Mono', Monaco, monospace;
+        }
+        .detail-text {
+            color: #aaa;
+            max-width: 400px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .empty-state {
+            text-align: center;
+            padding: 3rem;
+            color: #666;
+        }
+        .event-count {
+            color: #888;
+            font-size: 0.9rem;
+        }
+        .clear-btn {
+            padding: 0.4rem 0.8rem;
+            border: 1px solid #ef4444;
+            background: transparent;
+            color: #ef4444;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.85rem;
+            margin-left: auto;
+        }
+        .clear-btn:hover { background: #ef444422; }
+
+        /* Detail panel styles */
+        .detail-panel {
+            position: fixed;
+            top: 0;
+            right: -500px;
+            width: 500px;
+            height: 100vh;
+            background: #0d0d1a;
+            border-left: 1px solid #333;
+            transition: right 0.3s ease;
+            z-index: 1000;
+            display: flex;
+            flex-direction: column;
+            box-shadow: -4px 0 20px rgba(0,0,0,0.5);
+        }
+        .detail-panel.open { right: 0; }
+        .detail-panel-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 1rem;
+            border-bottom: 1px solid #333;
+            background: #16162a;
+        }
+        .detail-panel-header h2 {
+            font-size: 1.1rem;
+            color: #eee;
+            margin: 0;
+        }
+        .detail-panel-close {
+            background: none;
+            border: none;
+            color: #888;
+            font-size: 1.5rem;
+            cursor: pointer;
+            padding: 0.25rem 0.5rem;
+            line-height: 1;
+        }
+        .detail-panel-close:hover { color: #fff; }
+        .detail-panel-content {
+            flex: 1;
+            overflow-y: auto;
+            padding: 1rem;
+        }
+        .detail-section {
+            margin-bottom: 1.5rem;
+        }
+        .detail-section-title {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            color: #666;
+            margin-bottom: 0.5rem;
+            font-weight: 600;
+        }
+        .detail-value {
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 0.9rem;
+            color: #eee;
+            word-break: break-all;
+        }
+        .detail-value.json {
+            background: #1a1a2e;
+            padding: 0.75rem;
+            border-radius: 6px;
+            white-space: pre-wrap;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .detail-value.reason {
+            color: #fbbf24;
+        }
+        .events-table tr { cursor: pointer; }
+        .events-table tr.selected { background: #1a1a3e !important; }
+        .detail-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.3);
+            z-index: 999;
+            opacity: 0;
+            visibility: hidden;
+            transition: opacity 0.3s ease, visibility 0.3s ease;
+        }
+        .detail-overlay.open {
+            opacity: 1;
+            visibility: visible;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Hook Events</h1>
+        <nav class="nav-links">
+            <a href="/">Control</a>
+            <a href="/terminal">Terminal</a>
+            <a href="/history">History</a>
+            <a href="/hooks" class="active">Hooks</a>
+        </nav>
+
+        <div class="status-bar">
+            <div class="status-indicator">
+                <div class="status-dot" id="wsStatus"></div>
+                <span id="wsStatusText">Connecting...</span>
+            </div>
+            <span class="event-count"><span id="eventCount">0</span> events</span>
+            <button class="clear-btn" onclick="clearEvents()">Clear</button>
+        </div>
+
+        <div class="filter-bar">
+            <button class="filter-btn active" data-filter="all">All</button>
+            <button class="filter-btn" data-filter="Stop">Stop</button>
+            <button class="filter-btn" data-filter="PreToolUse">PreToolUse</button>
+            <button class="filter-btn" data-filter="PostToolUse">PostToolUse</button>
+            <button class="filter-btn" data-filter="Notification">Notification</button>
+        </div>
+
+        <div class="events-table">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Time</th>
+                        <th>Event</th>
+                        <th>Tool</th>
+                        <th>Session</th>
+                        <th>Details</th>
+                    </tr>
+                </thead>
+                <tbody id="eventsBody">
+                    <tr class="empty-state-row">
+                        <td colspan="5" class="empty-state">
+                            Waiting for hook events...<br>
+                            <small>Make sure Claude Code hooks are configured to POST to this server.</small>
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Detail panel overlay and panel -->
+    <div class="detail-overlay" id="detailOverlay" onclick="closeDetailPanel()"></div>
+    <div class="detail-panel" id="detailPanel">
+        <div class="detail-panel-header">
+            <h2>Event Details</h2>
+            <button class="detail-panel-close" onclick="closeDetailPanel()">&times;</button>
+        </div>
+        <div class="detail-panel-content" id="detailPanelContent">
+            <!-- Content populated by JavaScript -->
+        </div>
+    </div>
+
+    <script>
+        let events = [];
+        let activeFilter = 'all';
+        let ws = null;
+        let selectedEventIndex = null;
+
+        function formatTime(isoString) {
+            const d = new Date(isoString);
+            return d.toLocaleTimeString();
+        }
+
+        function formatFullTime(isoString) {
+            const d = new Date(isoString);
+            return d.toLocaleString();
+        }
+
+        function truncate(str, len) {
+            if (!str) return '';
+            return str.length > len ? str.substring(0, len) + '...' : str;
+        }
+
+        function escapeHtml(str) {
+            if (!str) return '';
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
+        }
+
+        function formatJson(obj) {
+            if (!obj) return '';
+            try {
+                const str = typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2);
+                return escapeHtml(str);
+            } catch (e) {
+                return escapeHtml(String(obj));
+            }
+        }
+
+        function getEventDetail(event) {
+            if (event.reason) return event.reason;
+            if (event.tool_input) {
+                const input = typeof event.tool_input === 'string'
+                    ? event.tool_input
+                    : JSON.stringify(event.tool_input);
+                return truncate(input, 60);
+            }
+            if (event.tool_result) return truncate(event.tool_result, 60);
+            return '';
+        }
+
+        function showDetailPanel(index) {
+            const filtered = activeFilter === 'all'
+                ? events
+                : events.filter(e => e.event_type === activeFilter);
+            const reversedIndex = filtered.length - 1 - index;
+            const event = filtered[reversedIndex];
+            if (!event) return;
+
+            selectedEventIndex = index;
+            const content = document.getElementById('detailPanelContent');
+
+            let html = '';
+
+            // Timestamp
+            html += `<div class="detail-section">
+                <div class="detail-section-title">Timestamp</div>
+                <div class="detail-value">${formatFullTime(event.timestamp)}</div>
+            </div>`;
+
+            // Event Type
+            html += `<div class="detail-section">
+                <div class="detail-section-title">Event Type</div>
+                <div class="detail-value"><span class="event-type ${event.event_type}">${event.event_type}</span></div>
+            </div>`;
+
+            // Session ID
+            html += `<div class="detail-section">
+                <div class="detail-section-title">Session ID</div>
+                <div class="detail-value">${escapeHtml(event.session_id)}</div>
+            </div>`;
+
+            // Tool Name (if present)
+            if (event.tool_name) {
+                html += `<div class="detail-section">
+                    <div class="detail-section-title">Tool Name</div>
+                    <div class="detail-value" style="color: #fbbf24;">${escapeHtml(event.tool_name)}</div>
+                </div>`;
+            }
+
+            // Reason (if present)
+            if (event.reason) {
+                html += `<div class="detail-section">
+                    <div class="detail-section-title">Reason</div>
+                    <div class="detail-value reason">${escapeHtml(event.reason)}</div>
+                </div>`;
+            }
+
+            // Tool Input (if present)
+            if (event.tool_input) {
+                html += `<div class="detail-section">
+                    <div class="detail-section-title">Tool Input</div>
+                    <div class="detail-value json">${formatJson(event.tool_input)}</div>
+                </div>`;
+            }
+
+            // Tool Result (if present)
+            if (event.tool_result) {
+                html += `<div class="detail-section">
+                    <div class="detail-section-title">Tool Result</div>
+                    <div class="detail-value json">${escapeHtml(event.tool_result)}</div>
+                </div>`;
+            }
+
+            content.innerHTML = html;
+            document.getElementById('detailPanel').classList.add('open');
+            document.getElementById('detailOverlay').classList.add('open');
+
+            // Highlight selected row
+            document.querySelectorAll('.events-table tbody tr').forEach((tr, i) => {
+                tr.classList.toggle('selected', i === index);
+            });
+        }
+
+        function closeDetailPanel() {
+            document.getElementById('detailPanel').classList.remove('open');
+            document.getElementById('detailOverlay').classList.remove('open');
+            selectedEventIndex = null;
+            document.querySelectorAll('.events-table tbody tr').forEach(tr => {
+                tr.classList.remove('selected');
+            });
+        }
+
+        // Close panel with Escape key
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') closeDetailPanel();
+        });
+
+        function renderEvents() {
+            const tbody = document.getElementById('eventsBody');
+            const filtered = activeFilter === 'all'
+                ? events
+                : events.filter(e => e.event_type === activeFilter);
+
+            if (filtered.length === 0) {
+                tbody.innerHTML = `
+                    <tr class="empty-state-row">
+                        <td colspan="5" class="empty-state">
+                            No ${activeFilter === 'all' ? '' : activeFilter + ' '}events yet
+                        </td>
+                    </tr>`;
+                return;
+            }
+
+            tbody.innerHTML = filtered.slice().reverse().map((e, idx) => `
+                <tr onclick="showDetailPanel(${idx})">
+                    <td class="timestamp">${formatTime(e.timestamp)}</td>
+                    <td><span class="event-type ${e.event_type}">${e.event_type}</span></td>
+                    <td class="tool-name">${e.tool_name || '-'}</td>
+                    <td class="session-id">${truncate(e.session_id, 12)}</td>
+                    <td class="detail-text">${escapeHtml(getEventDetail(e))}</td>
+                </tr>
+            `).join('');
+
+            document.getElementById('eventCount').textContent = events.length;
+
+            // Close detail panel when events are re-rendered (filter changed, etc.)
+            closeDetailPanel();
+        }
+
+        function addEvent(event) {
+            events.push(event);
+            // Keep last 500 events in UI
+            if (events.length > 500) {
+                events = events.slice(-500);
+            }
+            renderEvents();
+        }
+
+        function clearEvents() {
+            events = [];
+            renderEvents();
+        }
+
+        function connectWebSocket() {
+            const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            ws = new WebSocket(`${protocol}//${location.host}/ws/hooks${location.search}`);
+
+            ws.onopen = () => {
+                document.getElementById('wsStatus').classList.remove('disconnected');
+                document.getElementById('wsStatusText').textContent = 'Connected';
+            };
+
+            ws.onclose = () => {
+                document.getElementById('wsStatus').classList.add('disconnected');
+                document.getElementById('wsStatusText').textContent = 'Disconnected - reconnecting...';
+                setTimeout(connectWebSocket, 3000);
+            };
+
+            ws.onerror = () => {
+                document.getElementById('wsStatus').classList.add('disconnected');
+                document.getElementById('wsStatusText').textContent = 'Connection error';
+            };
+
+            ws.onmessage = (e) => {
+                // Skip non-JSON messages (like 'pong' responses)
+                if (!e.data || !e.data.startsWith('{')) {
+                    return;
+                }
+                try {
+                    const event = JSON.parse(e.data);
+                    addEvent(event);
+                } catch (err) {
+                    console.error('Failed to parse event:', err);
+                }
+            };
+        }
+
+        // Filter buttons
+        document.querySelectorAll('.filter-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                activeFilter = btn.dataset.filter;
+                renderEvents();
+            });
+        });
+
+        // Start WebSocket connection
+        connectWebSocket();
+
+        // Ping to keep connection alive
+        setInterval(() => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send('ping');
+            }
+        }, 25000);
+    </script>
+</body>
+</html>
+"""
+
 # ============================================================================
 # Routes
 # ============================================================================
+
+def detect_idle_from_terminal(content: str) -> bool:
+    """Check if terminal content indicates Claude is idle (waiting for input)."""
+    if not content:
+        return False
+    # Check the last portion of content (last ~500 chars) for idle indicators
+    # The "↵send" hint may not be on the absolute last line due to terminal formatting
+    tail = content[-500:] if len(content) > 500 else content
+
+    # Check for common idle indicators anywhere in the tail:
+    # - "↵" with "send" nearby - enter to send hint
+    # - "❯" prompt character on a line
+    if '↵' in tail and 'send' in tail.lower():
+        return True
+
+    # Also check the last few lines for prompt characters
+    lines = content.strip().split('\n')
+    for line in lines[-5:]:  # Check last 5 lines
+        line = line.strip()
+        # Prompt at start of line
+        if line.startswith('❯') or line.startswith('›'):
+            return True
+        # Just the prompt character
+        if line in ('❯', '>', '›'):
+            return True
+
+    return False
+
 
 @app.route('/')
 @requires_auth
@@ -2264,55 +3655,40 @@ def index():
     selected_session = request.args.get('session')
 
     if not selected_session or selected_session not in sessions:
-        # Default to first session with pending prompts, or first session overall
-        for s in sessions:
-            if state.get_session(s).pending_prompts:
-                selected_session = s
-                break
-        if not selected_session and sessions:
+        # Default to first session
+        if sessions:
             selected_session = sessions[0]
 
     state.active_session = selected_session
 
+    is_compacting = False
+    is_idle = False
     if selected_session:
-        content = backend.get_content(selected_session)
         session_state = state.get_session(selected_session)
-        pending_prompts = session_state.pending_prompts
-        parsed_options = session_state.parsed_options
         is_compacting = session_state.is_compacting
-    else:
-        content = ""
-        pending_prompts = []
-        parsed_options = []
-        is_compacting = False
-
-    lines = content.strip().split('\n')[-10:] if content else []
-    last_content = '\n'.join(lines)
+        # Check terminal content for idle state
+        content = backend.get_content(selected_session)
+        is_idle = detect_idle_from_terminal(content)
 
     # Build session info for UI
     sessions_info = []
     for s in sessions:
-        ss = state.get_session(s)
         sessions_info.append({
             'name': s,
-            'waiting': len(ss.pending_prompts) > 0,
             'active': s == selected_session
         })
 
     return render_template_string(
         MAIN_TEMPLATE,
-        pending_prompts=pending_prompts,
-        options=parsed_options,
-        last_content=last_content,
         now=datetime.now().strftime('%H:%M:%S'),
         local_ip=get_local_ip(),
         port=config['server']['port'],
         session=selected_session or 'No sessions',
         sessions=sessions_info,
-        all_pending=state.get_all_pending(),
         notifications_paused=state.notifications_paused,
         notification_mode=state.notification_mode,
-        is_compacting=is_compacting
+        is_compacting=is_compacting,
+        is_idle=is_idle
     )
 
 @app.route('/terminal')
@@ -2331,17 +3707,17 @@ def terminal():
 @app.route('/history')
 @requires_auth
 def history():
-    session = request.args.get('session') or state.active_session
-    if session:
-        session_state = state.get_session(session)
-        hist = session_state.prompt_history
-    else:
-        # Combine all histories
-        hist = []
-        for ss in state.sessions.values():
-            hist.extend(ss.prompt_history)
-        hist.sort(key=lambda x: x.get('time', ''), reverse=True)
-    return render_template_string(HISTORY_TEMPLATE, history=hist)
+    # History page now shows hook events instead of terminal-parsed prompts
+    # TODO: Could add a history of hook events here if needed
+    return render_template_string(HISTORY_TEMPLATE, history=[])
+
+
+@app.route('/hooks')
+@requires_auth
+def hooks():
+    """Hook events visualization page."""
+    return render_template_string(HOOKS_TEMPLATE)
+
 
 @app.route('/send', methods=['POST'])
 @requires_auth
@@ -2357,11 +3733,7 @@ def send_input():
     success = backend.send_keys(session, text)
 
     if success:
-        # Clear session-specific state
-        session_state = state.get_session(session)
-        session_state.pending_prompts = []
-        session_state.last_prompt = None
-        session_state.parsed_options = []
+        # State is now managed via hooks, no need to clear prompt state
         return jsonify({'success': True})
     else:
         return jsonify({'success': False, 'error': f'Failed to send keys via {backend.name}'})
@@ -2379,10 +3751,6 @@ def send_esc():
     success = backend.send_esc(session)
 
     if success:
-        session_state = state.get_session(session)
-        session_state.pending_prompts = []
-        session_state.last_prompt = None
-        session_state.parsed_options = []
         return jsonify({'success': True})
     else:
         return jsonify({'success': False, 'error': f'Failed to send Esc via {backend.name}'})
@@ -2410,12 +3778,6 @@ def quick_send(input_val):
     success = backend.send_keys(session, input_val)
 
     if success:
-        # Clear session-specific state
-        session_state = state.get_session(session)
-        session_state.pending_prompts = []
-        session_state.last_prompt = None
-        session_state.parsed_options = []
-
         # Return JSON for POST (ntfy), redirect for GET (browser)
         if request.method == 'POST':
             return jsonify({'success': True})
@@ -2440,36 +3802,20 @@ def api_content():
 @app.route('/api/status')
 @requires_auth
 def api_status():
+    """Get session status. Note: prompt detection now uses hooks instead of terminal parsing."""
     session = request.args.get('session') or state.active_session
     sessions = backend.get_sessions()
 
+    is_compacting = False
     if session:
-        content = backend.get_content(session)
-        is_prompt, context, prompt_type, signature = detect_prompt(content)
         session_state = state.get_session(session)
-        pending_count = len(session_state.pending_prompts)
-        options = session_state.parsed_options
-        last_time = session_state.last_prompt_time.isoformat() if session_state.last_prompt_time else None
         is_compacting = session_state.is_compacting
-    else:
-        is_prompt, context, prompt_type, signature = False, None, None, None
-        pending_count = 0
-        options = []
-        last_time = None
-        is_compacting = False
 
     return jsonify({
-        'waiting': is_prompt,
-        'prompt_type': prompt_type,
-        'pending_count': pending_count,
-        'context': context,
-        'options': options,
-        'last_prompt_time': last_time,
         'is_compacting': is_compacting,
         'session': session,
         'sessions': sessions,
-        'backend': backend.name,
-        'all_pending': state.get_all_pending()
+        'backend': backend.name
     })
 
 @app.route('/test-notify', methods=['GET', 'POST'])
@@ -2531,24 +3877,102 @@ def show_config():
 @app.route('/api/clear-prompts', methods=['POST'])
 @requires_auth
 def api_clear_prompts():
-    """Clear pending prompts (used by Ignore button in notifications)."""
-    session = request.args.get('session')
+    """Legacy endpoint - prompts now handled via hooks. Kept for backward compatibility."""
+    return jsonify({'success': True, 'cleared': 0})
 
-    if session:
-        # Clear specific session
-        session_state = state.get_session(session)
-        count = len(session_state.pending_prompts)
-        session_state.pending_prompts.clear()
-        print(f"[api] Cleared {count} pending prompts for {session}")
-    else:
-        # Clear all sessions
-        count = 0
-        for session_state in state.sessions.values():
-            count += len(session_state.pending_prompts)
-            session_state.pending_prompts.clear()
-        print(f"[api] Cleared {count} pending prompts (all sessions)")
 
-    return jsonify({'success': True, 'cleared': count})
+@app.route('/api/hook', methods=['POST'])
+def api_hook():
+    """Receive hook events from Claude Code hooks."""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'No JSON data'}), 400
+
+        # Extract common fields from hook input
+        event_type = data.get('hook_event_name', 'unknown')
+        session_id = data.get('session_id', 'unknown')
+        tool_name = data.get('tool_name')
+        tool_input = data.get('tool_input')
+        tool_result = data.get('tool_result')
+        reason = data.get('reason')
+
+        # Create and store the hook event
+        # Default permission_mode to 'ask' for PreToolUse events (matches notification logic)
+        permission_mode = data.get('permission_mode', 'ask') if event_type == 'PreToolUse' else None
+        event = HookEvent(
+            timestamp=datetime.now(),
+            event_type=event_type,
+            session_id=session_id,
+            tool_name=tool_name,
+            tool_input=tool_input,
+            tool_result=str(tool_result) if tool_result else None,
+            reason=reason,
+            raw_data=data,
+            permission_mode=permission_mode
+        )
+        state.add_hook_event(event)
+
+        log.info(f"[hook] {event_type}: {tool_name or reason or 'no details'} (session: {session_id})")
+
+        # Determine if this event should trigger a notification
+        should_notify = False
+        notification_message = None
+        notification_title = None
+
+        if event_type == 'Stop':
+            should_notify = True
+            notification_message = f"Claude has finished"
+            if reason:
+                notification_message += f": {reason[:100]}"
+            notification_title = f"Claude Done [{session_id[:8]}]"
+
+        elif event_type == 'Notification':
+            should_notify = True
+            notification_message = data.get('message', 'Notification from Claude')
+            notification_title = f"Claude [{session_id[:8]}]"
+
+        elif event_type == 'PreToolUse':
+            # Check if this is a permission-requiring tool
+            permission_mode = data.get('permission_mode', 'ask')
+            if permission_mode == 'ask':
+                should_notify = True
+                notification_message = f"Permission needed for: {tool_name}"
+                if tool_input:
+                    # Add brief context from tool input
+                    input_str = str(tool_input)[:100]
+                    notification_message += f"\n{input_str}"
+                notification_title = f"Claude Permission [{session_id[:8]}]"
+
+        # Send notification if warranted
+        if should_notify:
+            send_notification(
+                message=notification_message,
+                title=notification_title,
+                session=session_id
+            )
+
+        return jsonify({'success': True, 'event_type': event_type})
+
+    except Exception as e:
+        log.error(f"[hook] Error processing hook: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/hooks')
+@requires_auth
+def api_hooks():
+    """Get recent hook events."""
+    session_id = request.args.get('session')
+    event_type = request.args.get('type')
+    limit = int(request.args.get('limit', 100))
+
+    events = state.get_hook_events(session_id=session_id, event_type=event_type, limit=limit)
+    return jsonify({
+        'events': [e.to_dict() for e in events],
+        'total': len(state.hook_events)
+    })
+
 
 # ============================================================================
 # Main
@@ -2573,11 +3997,13 @@ def main():
 ╠═══════════════════════════════════════════════════════════╣
 ║  Control Panel: http://{local_ip}:{port}/
 ║  Terminal:      http://{local_ip}:{port}/terminal
+║  Hooks:         http://{local_ip}:{port}/hooks
 ║  Auth Method:   {config['auth']['method']}
 ║  Backend:       {backend.name}
 ║  ntfy prefix:   {ntfy_prefix}-<session>
 ╠═══════════════════════════════════════════════════════════╣
 ║  Backends:  tmux: {tmux_status:<12}  ghostty: {ghostty_status:<12}  ║
+║  Hooks:     Run ./hooks/install.sh to configure             ║
 ╚═══════════════════════════════════════════════════════════╝
     """)
 

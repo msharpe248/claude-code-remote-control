@@ -26,11 +26,14 @@ Control Claude Code from your phone. Get push notifications with action buttons 
 - **Multi-Session Support** - Automatically watches ALL sessions, separate notifications per session
 - **Push Notifications** - Get notified when any Claude session needs input (ntfy.sh or Pushover)
 - **Notification Modes** - Active (immediate), Standby (start paused), or Log-only (testing)
-- **Smart Prompt Detection** - Detects questions, confirmations, and idle states
-- **Idle Prompt Actions** - Shows default text with "Send" button when Claude suggests a command
-- **Session Tabs** - Switch between sessions in the web UI, badges show pending counts
+- **Claude Code Hooks Integration** - Real-time event streaming from Claude Code hooks
+- **Rich Question UI** - Beautiful panels for AskUserQuestion prompts with clickable options
+- **Tool Permission Dialogs** - Approve/deny tool usage (Edit, Bash, Write) from your phone
+- **Idle Detection** - Shows input panel when Claude finishes and is ready for new tasks
+- **Session Tabs** - Switch between sessions in the web UI
 - **Embedded Terminal** - Full terminal in your browser (xterm.js for tmux, polling for Ghostty)
-- **Mobile-Friendly Control Panel** - Quick buttons for common responses
+- **Hook Events Viewer** - Real-time log of all Claude Code hook events at `/hooks`
+- **Mobile-Friendly Control Panel** - Responsive UI optimized for phone browsers
 - **Pause Toggle** - Pause notifications from the web UI when actively working
 - **Single Port** - Everything runs on one port (8765), no ttyd needed
 
@@ -45,6 +48,9 @@ cp config.yaml.example config.yaml
 # Install dependencies
 ./install.sh
 
+# Install Claude Code hooks (enables rich UI features)
+cd hooks && ./install.sh --local && cd ..
+
 # Start the server
 ./start.sh
 
@@ -57,11 +63,10 @@ Then open `http://<your-lan-ip>:8765/` on your phone.
 ## How It Works
 
 1. **Claude Code runs in terminal** - tmux sessions OR Ghostty tabs/panes
-2. **Auto-detect backend** - Server finds tmux or Ghostty automatically
-3. **Watcher monitors ALL sessions** - Polls every 2 seconds, detects prompts
-4. **Smart detection** - Recognizes questions ("Esc to cancel"), idle state ("? for shortcuts"), and busy state ("esc to interrupt")
-5. **Per-session notifications** - Each session gets its own ntfy topic
-6. **Tap to respond** - Open notification to access web UI, or tap Ignore to dismiss
+2. **Hooks stream events** - Claude Code hooks send real-time events to the server
+3. **Rich UI panels** - Questions, permissions, and idle state show as interactive panels
+4. **Per-session notifications** - Each session gets its own ntfy topic
+5. **Tap to respond** - Open notification to access web UI, answer questions, approve tools
 
 ## Terminal Backends
 
@@ -181,13 +186,12 @@ terminal:
 ## Web Interface
 
 ### Control Panel (`/`)
-- **Session Tabs** - Switch between tmux sessions (appears when 2+ sessions exist)
-- **Pending Badges** - Red badges show how many prompts are waiting per session
-- Status indicator (waiting/working)
-- Current prompt display
-- **Detected Options** - Parsed numbered choices with labels
-- Quick actions: 1-4, y, n, Enter, q
-- Custom text input
+- **Session Tabs** - Switch between sessions (appears when 2+ sessions exist)
+- **Question Panels** - Rich UI for AskUserQuestion prompts with clickable options
+- **Permission Dialogs** - Approve/deny tool usage with context preview
+- **Idle Panel** - Input field when Claude is ready for new tasks
+- **Status Indicator** - Shows current state (working, idle, compacting)
+- Cancel/interrupt button for emergencies
 - Link to full terminal
 
 ### Terminal (`/terminal`)
@@ -195,28 +199,66 @@ terminal:
 - **Ghostty**: Polling-based view with command input bar
 - Auto-reconnect
 
+### Hook Events (`/hooks`)
+- Real-time stream of all Claude Code hook events
+- Filter by event type (Stop, PreToolUse, PostToolUse, Notification)
+- Click events to view full details
+- WebSocket-powered live updates
+
 ### API
 All endpoints accept `?session=<name>` to target a specific session.
 
-- `GET /` - Control panel (defaults to session with pending prompts)
+- `GET /` - Control panel (defaults to active session)
 - `GET /terminal` - Full terminal for selected session
-- `GET /history` - Prompt history
-- `GET /api/status` - JSON status (includes all sessions info)
+- `GET /hooks` - Hook events viewer
+- `GET /history` - Event history
+- `GET /api/status` - JSON status
+- `GET /api/hooks` - Hook events as JSON
+- `POST /api/hook` - Receive hook events (used by notify.sh)
 - `POST /send` - Send input `{input: "text", session: "name"}`
 - `GET/POST /quick/<n>` - Quick send
-- `POST /api/clear-prompts` - Clear pending prompts (used by Ignore button)
 - `GET /test-notify` - Test notification preview
 - `GET /config` - Current config
 
 ## Workflow
 
-1. `./start.sh` - Start the server (watches all tmux sessions)
-2. Start Claude in one or more tmux sessions
-3. Step away
-4. Get notification: `Claude [session-name]: needs input`
-5. Tap notification to open web UI, or tap Ignore to dismiss
-6. Type your response or use quick buttons
-7. Claude continues
+1. `./start.sh` - Start the server
+2. Start Claude in a terminal session
+3. Step away from your desk
+4. Get push notification when Claude:
+   - Asks a question (AskUserQuestion)
+   - Needs tool permission (Edit, Bash, Write)
+   - Finishes a task (Stop)
+5. Tap notification to open web UI
+6. Answer questions, approve tools, or send new tasks
+7. Claude continues working
+
+## Claude Code Hooks
+
+The rich UI features (question panels, permission dialogs, idle detection) are powered by Claude Code hooks. When installed, hooks send real-time events to the server.
+
+### Installation
+
+```bash
+cd hooks
+./install.sh --local   # Install for current directory only
+# OR
+./install.sh --global  # Install for all Claude Code sessions
+```
+
+### Hook Events
+
+| Event | UI Effect |
+|-------|-----------|
+| `PreToolUse` + `AskUserQuestion` | Shows question panel with options |
+| `PreToolUse` + permission required | Shows permission dialog |
+| `PostToolUse` | Hides dialogs, Claude continues |
+| `Stop` | Shows idle panel for new input |
+| `Notification` | Forwards to push notification |
+
+### Without Hooks
+
+If hooks aren't installed, the server falls back to terminal-based idle detection (looks for `❯` prompt). The rich question and permission UIs won't be available.
 
 ## Security
 
@@ -299,8 +341,7 @@ tmux new-session -d -s personal
 remotecontrol/
 ├── config.yaml.example  # Configuration template (copy to config.yaml)
 ├── config.yaml          # Your config (git-ignored, contains secrets)
-├── server.py            # Flask server + WebSocket terminal + watcher
-├── ghostty_reader.py    # Ghostty accessibility API helper
+├── server.py            # Flask server + WebSocket + hooks handler
 ├── claude-remote        # Wrapper script for session naming
 ├── start.sh             # Startup script
 ├── install.sh           # Installation
@@ -309,6 +350,10 @@ remotecontrol/
 ├── cc-diagnose          # Run diagnostics
 ├── cc-test-notify       # Test notifications
 ├── cc-logs              # View/filter logs
+├── hooks/               # Claude Code hooks integration
+│   ├── install.sh       # Hook installer (global or local)
+│   ├── notify.sh        # Hook script that sends events to server
+│   └── README.md        # Hooks documentation
 ├── README.md
 └── venv/                # Python virtual environment
 ```
