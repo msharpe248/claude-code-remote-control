@@ -3179,6 +3179,10 @@ HOOKS_TEMPLATE = """
             font-family: 'SF Mono', Monaco, monospace;
             color: #fbbf24;
         }
+        .perm-badge {
+            margin-left: 0.4rem;
+            font-size: 0.75rem;
+        }
         .session-id {
             font-family: 'SF Mono', Monaco, monospace;
             color: #888;
@@ -3396,6 +3400,16 @@ HOOKS_TEMPLATE = """
                 </div>`;
             }
 
+            // Permission Mode (if present)
+            if (event.permission_mode) {
+                const permColor = event.permission_mode === 'ask' ? '#f87171' : '#4ade80';
+                const permLabel = event.permission_mode === 'ask' ? 'Permission Required' : event.permission_mode;
+                html += `<div class="detail-item">
+                    <div class="detail-label">Permission</div>
+                    <div class="detail-value" style="color: ${permColor};">${escapeHtml(permLabel)}</div>
+                </div>`;
+            }
+
             // Reason (if present)
             if (event.reason) {
                 html += `<div class="detail-item detail-full-width">
@@ -3497,15 +3511,17 @@ HOOKS_TEMPLATE = """
                 if (!e.id) e.id = 'evt-' + i + '-' + Date.now();
             });
 
-            tbody.innerHTML = filtered.slice().reverse().map((e) => `
+            tbody.innerHTML = filtered.slice().reverse().map((e) => {
+                const permBadge = e.permission_mode === 'ask' ? '<span class="perm-badge">🔐</span>' : '';
+                return `
                 <tr onclick="toggleEventDetail('${e.id}', this)" class="${e.id === expandedEventId ? 'selected' : ''}">
                     <td class="timestamp">${formatTime(e.timestamp)}</td>
                     <td><span class="event-type ${e.event_type}">${e.event_type}</span></td>
-                    <td class="tool-name">${e.tool_name || '-'}</td>
+                    <td class="tool-name">${e.tool_name || '-'}${permBadge}</td>
                     <td class="session-id">${truncate(e.session_id, 12)}</td>
                     <td class="detail-text">${escapeHtml(getEventDetail(e))}</td>
-                </tr>
-            `).join('');
+                </tr>`;
+            }).join('');
 
             document.getElementById('eventCount').textContent = events.length;
 
