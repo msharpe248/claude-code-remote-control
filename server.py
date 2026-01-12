@@ -4662,6 +4662,18 @@ def control():
 @requires_auth
 def terminal():
     session = request.args.get('session') or state.active_session or config['tmux']['session_name']
+
+    # Normalize session (TTY) if needed - backend uses s006 format, hooks use ttys006
+    sessions = backend.get_sessions()
+    if session and session not in sessions:
+        # Try normalized form (ttys006 -> s006)
+        normalized = session[3:] if session.startswith('tty') else session
+        if normalized in sessions:
+            session = normalized
+        elif sessions:
+            # Fallback to first available session
+            session = sessions[0]
+
     polling_mode = not backend.supports_terminal_attach()
     return render_template_string(
         TERMINAL_TEMPLATE,
