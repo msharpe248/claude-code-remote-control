@@ -1540,6 +1540,7 @@ MAIN_TEMPLATE = """
         .btn-warning { background: #f59e0b; color: black; }
         .btn-danger { background: #ef4444; color: white; }
         .btn-secondary { background: #4b5563; color: white; }
+        .btn-mode { background: #0891b2; color: white; }
         .btn-full { grid-column: 1 / -1; }
         .btn-num { font-size: 1.25rem; font-weight: bold; }
         .btn-label { font-size: 0.7rem; opacity: 0.8; margin-top: 2px; }
@@ -2214,10 +2215,14 @@ MAIN_TEMPLATE = """
         </div>
 
         <!-- Fallback actions -->
-        <div class="actions">
+        <div class="actions two-col">
             <button class="btn btn-danger" onclick="sendEsc()">
                 <span class="btn-num">⎋</span>
                 <span class="btn-label">Cancel/Interrupt</span>
+            </button>
+            <button class="btn btn-mode" onclick="cycleMode()">
+                <span class="btn-num" id="mode-btn-icon">⇧⇥</span>
+                <span class="btn-label" id="mode-btn-label">Cycle Mode</span>
             </button>
         </div>
 
@@ -2312,22 +2317,28 @@ MAIN_TEMPLATE = """
 
         function updateModeDisplay(mode) {
             currentMode = mode;
+            // Update idle panel display
             const iconEl = document.getElementById('mode-icon');
             const labelEl = document.getElementById('mode-label');
-            if (!iconEl || !labelEl) return;
+            // Update button display
+            const btnIconEl = document.getElementById('mode-btn-icon');
+            const btnLabelEl = document.getElementById('mode-btn-label');
 
             if (mode === 'plan') {
-                iconEl.textContent = '⏸';
-                iconEl.className = 'mode-icon plan';
-                labelEl.textContent = 'Plan mode on';
+                if (iconEl) { iconEl.textContent = '⏸'; iconEl.className = 'mode-icon plan'; }
+                if (labelEl) labelEl.textContent = 'Plan mode on';
+                if (btnIconEl) btnIconEl.textContent = '⏸';
+                if (btnLabelEl) btnLabelEl.textContent = 'Plan Mode';
             } else if (mode === 'edits') {
-                iconEl.textContent = '▶▶';
-                iconEl.className = 'mode-icon edits';
-                labelEl.textContent = 'Accept edits on';
+                if (iconEl) { iconEl.textContent = '▶▶'; iconEl.className = 'mode-icon edits'; }
+                if (labelEl) labelEl.textContent = 'Accept edits on';
+                if (btnIconEl) btnIconEl.textContent = '▶▶';
+                if (btnLabelEl) btnLabelEl.textContent = 'Auto-Accept';
             } else {
-                iconEl.textContent = '●';
-                iconEl.className = 'mode-icon normal';
-                labelEl.textContent = 'Normal mode';
+                if (iconEl) { iconEl.textContent = '●'; iconEl.className = 'mode-icon normal'; }
+                if (labelEl) labelEl.textContent = 'Normal mode';
+                if (btnIconEl) btnIconEl.textContent = '⇧⇥';
+                if (btnLabelEl) btnLabelEl.textContent = 'Cycle Mode';
             }
         }
 
