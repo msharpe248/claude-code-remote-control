@@ -3216,95 +3216,59 @@ HOOKS_TEMPLATE = """
             margin-left: auto;
         }
         .clear-btn:hover { background: #ef444422; }
+        .events-table tr { cursor: pointer; }
+        .events-table tr.selected { background: #1a1a3e !important; }
 
-        /* Detail panel styles */
-        .detail-panel {
-            position: fixed;
-            top: 0;
-            right: -500px;
-            width: 500px;
-            height: 100vh;
-            background: #0d0d1a;
-            border-left: 1px solid #333;
-            transition: right 0.3s ease;
-            z-index: 1000;
-            display: flex;
-            flex-direction: column;
-            box-shadow: -4px 0 20px rgba(0,0,0,0.5);
+        /* Inline detail expansion */
+        .event-detail-row td {
+            padding: 0 !important;
+            border-top: none !important;
         }
-        .detail-panel.open { right: 0; }
-        .detail-panel-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding: 1rem;
-            border-bottom: 1px solid #333;
+        .event-detail-content {
             background: #16162a;
-        }
-        .detail-panel-header h2 {
-            font-size: 1.1rem;
-            color: #eee;
-            margin: 0;
-        }
-        .detail-panel-close {
-            background: none;
-            border: none;
-            color: #888;
-            font-size: 1.5rem;
-            cursor: pointer;
-            padding: 0.25rem 0.5rem;
-            line-height: 1;
-        }
-        .detail-panel-close:hover { color: #fff; }
-        .detail-panel-content {
-            flex: 1;
-            overflow-y: auto;
             padding: 1rem;
+            border-top: 1px solid #333;
+            animation: expandIn 0.2s ease;
         }
-        .detail-section {
-            margin-bottom: 1.5rem;
+        @keyframes expandIn {
+            from { opacity: 0; max-height: 0; }
+            to { opacity: 1; max-height: 500px; }
         }
-        .detail-section-title {
-            font-size: 0.75rem;
+        .detail-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+        }
+        .detail-item {
+            min-width: 0;
+        }
+        .detail-label {
+            font-size: 0.7rem;
             text-transform: uppercase;
             color: #666;
-            margin-bottom: 0.5rem;
+            margin-bottom: 0.25rem;
             font-weight: 600;
         }
         .detail-value {
             font-family: 'SF Mono', Monaco, monospace;
-            font-size: 0.9rem;
+            font-size: 0.85rem;
             color: #eee;
-            word-break: break-all;
+            word-break: break-word;
         }
         .detail-value.json {
-            background: #1a1a2e;
+            background: #0d0d1a;
             padding: 0.75rem;
             border-radius: 6px;
             white-space: pre-wrap;
-            max-height: 300px;
+            max-height: 200px;
             overflow-y: auto;
+            font-size: 0.8rem;
         }
         .detail-value.reason {
             color: #fbbf24;
         }
-        .events-table tr { cursor: pointer; }
-        .events-table tr.selected { background: #1a1a3e !important; }
-        .detail-overlay {
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background: rgba(0,0,0,0.3);
-            z-index: 999;
-            opacity: 0;
-            visibility: hidden;
-            transition: opacity 0.3s ease, visibility 0.3s ease;
-        }
-        .detail-overlay.open {
-            opacity: 1;
-            visibility: visible;
+        .detail-full-width {
+            grid-column: 1 / -1;
         }
     </style>
 </head>
@@ -3357,23 +3321,11 @@ HOOKS_TEMPLATE = """
         </div>
     </div>
 
-    <!-- Detail panel overlay and panel -->
-    <div class="detail-overlay" id="detailOverlay" onclick="closeDetailPanel()"></div>
-    <div class="detail-panel" id="detailPanel">
-        <div class="detail-panel-header">
-            <h2>Event Details</h2>
-            <button class="detail-panel-close" onclick="closeDetailPanel()">&times;</button>
-        </div>
-        <div class="detail-panel-content" id="detailPanelContent">
-            <!-- Content populated by JavaScript -->
-        </div>
-    </div>
-
     <script>
         let events = [];
         let activeFilter = 'all';
         let ws = null;
-        let selectedEventIndex = null;
+        let expandedEventId = null;
 
         function formatTime(isoString) {
             const d = new Date(isoString);
@@ -3419,91 +3371,108 @@ HOOKS_TEMPLATE = """
             return '';
         }
 
-        function showDetailPanel(index) {
-            const filtered = activeFilter === 'all'
-                ? events
-                : events.filter(e => e.event_type === activeFilter);
-            const reversedIndex = filtered.length - 1 - index;
-            const event = filtered[reversedIndex];
-            if (!event) return;
+        function buildDetailHtml(event) {
+            let html = '<div class="detail-grid">';
 
-            selectedEventIndex = index;
-            const content = document.getElementById('detailPanelContent');
-
-            let html = '';
-
-            // Timestamp
-            html += `<div class="detail-section">
-                <div class="detail-section-title">Timestamp</div>
+            // Row 1: Timestamp, Event Type, Session
+            html += `<div class="detail-item">
+                <div class="detail-label">Timestamp</div>
                 <div class="detail-value">${formatFullTime(event.timestamp)}</div>
             </div>`;
-
-            // Event Type
-            html += `<div class="detail-section">
-                <div class="detail-section-title">Event Type</div>
+            html += `<div class="detail-item">
+                <div class="detail-label">Event Type</div>
                 <div class="detail-value"><span class="event-type ${event.event_type}">${event.event_type}</span></div>
             </div>`;
-
-            // Session ID
-            html += `<div class="detail-section">
-                <div class="detail-section-title">Session ID</div>
+            html += `<div class="detail-item">
+                <div class="detail-label">Session ID</div>
                 <div class="detail-value">${escapeHtml(event.session_id)}</div>
             </div>`;
 
             // Tool Name (if present)
             if (event.tool_name) {
-                html += `<div class="detail-section">
-                    <div class="detail-section-title">Tool Name</div>
+                html += `<div class="detail-item">
+                    <div class="detail-label">Tool Name</div>
                     <div class="detail-value" style="color: #fbbf24;">${escapeHtml(event.tool_name)}</div>
                 </div>`;
             }
 
             // Reason (if present)
             if (event.reason) {
-                html += `<div class="detail-section">
-                    <div class="detail-section-title">Reason</div>
+                html += `<div class="detail-item detail-full-width">
+                    <div class="detail-label">Reason</div>
                     <div class="detail-value reason">${escapeHtml(event.reason)}</div>
                 </div>`;
             }
 
             // Tool Input (if present)
             if (event.tool_input) {
-                html += `<div class="detail-section">
-                    <div class="detail-section-title">Tool Input</div>
+                html += `<div class="detail-item detail-full-width">
+                    <div class="detail-label">Tool Input</div>
                     <div class="detail-value json">${formatJson(event.tool_input)}</div>
                 </div>`;
             }
 
             // Tool Result (if present)
             if (event.tool_result) {
-                html += `<div class="detail-section">
-                    <div class="detail-section-title">Tool Result</div>
+                html += `<div class="detail-item detail-full-width">
+                    <div class="detail-label">Tool Result</div>
                     <div class="detail-value json">${escapeHtml(event.tool_result)}</div>
                 </div>`;
             }
 
-            content.innerHTML = html;
-            document.getElementById('detailPanel').classList.add('open');
-            document.getElementById('detailOverlay').classList.add('open');
-
-            // Highlight selected row
-            document.querySelectorAll('.events-table tbody tr').forEach((tr, i) => {
-                tr.classList.toggle('selected', i === index);
-            });
+            html += '</div>';
+            return html;
         }
 
-        function closeDetailPanel() {
-            document.getElementById('detailPanel').classList.remove('open');
-            document.getElementById('detailOverlay').classList.remove('open');
-            selectedEventIndex = null;
-            document.querySelectorAll('.events-table tbody tr').forEach(tr => {
+        function toggleEventDetail(eventId, rowElement) {
+            const existingDetail = document.getElementById('detail-' + eventId);
+
+            // If clicking the same row, collapse it
+            if (existingDetail) {
+                existingDetail.remove();
+                rowElement.classList.remove('selected');
+                expandedEventId = null;
+                return;
+            }
+
+            // Collapse any previously expanded row
+            const prevDetail = document.querySelector('.event-detail-row');
+            if (prevDetail) {
+                prevDetail.remove();
+            }
+            document.querySelectorAll('.events-table tbody tr.selected').forEach(tr => {
                 tr.classList.remove('selected');
             });
+
+            // Find the event
+            const filtered = activeFilter === 'all'
+                ? events
+                : events.filter(e => e.event_type === activeFilter);
+            const event = filtered.find(e => e.id === eventId);
+            if (!event) return;
+
+            // Create detail row
+            const detailRow = document.createElement('tr');
+            detailRow.className = 'event-detail-row';
+            detailRow.id = 'detail-' + eventId;
+            detailRow.innerHTML = `<td colspan="5"><div class="event-detail-content">${buildDetailHtml(event)}</div></td>`;
+
+            // Insert after the clicked row
+            rowElement.classList.add('selected');
+            rowElement.after(detailRow);
+            expandedEventId = eventId;
         }
 
-        // Close panel with Escape key
+        // Close expanded detail with Escape key
         document.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape') closeDetailPanel();
+            if (e.key === 'Escape' && expandedEventId) {
+                const detail = document.querySelector('.event-detail-row');
+                if (detail) detail.remove();
+                document.querySelectorAll('.events-table tbody tr.selected').forEach(tr => {
+                    tr.classList.remove('selected');
+                });
+                expandedEventId = null;
+            }
         });
 
         function renderEvents() {
@@ -3519,11 +3488,17 @@ HOOKS_TEMPLATE = """
                             No ${activeFilter === 'all' ? '' : activeFilter + ' '}events yet
                         </td>
                     </tr>`;
+                expandedEventId = null;
                 return;
             }
 
-            tbody.innerHTML = filtered.slice().reverse().map((e, idx) => `
-                <tr onclick="showDetailPanel(${idx})">
+            // Assign unique IDs to events if not present
+            filtered.forEach((e, i) => {
+                if (!e.id) e.id = 'evt-' + i + '-' + Date.now();
+            });
+
+            tbody.innerHTML = filtered.slice().reverse().map((e) => `
+                <tr onclick="toggleEventDetail('${e.id}', this)" class="${e.id === expandedEventId ? 'selected' : ''}">
                     <td class="timestamp">${formatTime(e.timestamp)}</td>
                     <td><span class="event-type ${e.event_type}">${e.event_type}</span></td>
                     <td class="tool-name">${e.tool_name || '-'}</td>
@@ -3534,8 +3509,23 @@ HOOKS_TEMPLATE = """
 
             document.getElementById('eventCount').textContent = events.length;
 
-            // Close detail panel when events are re-rendered (filter changed, etc.)
-            closeDetailPanel();
+            // Re-expand the previously expanded event if it still exists
+            if (expandedEventId) {
+                const row = document.querySelector(`tr[onclick*="${expandedEventId}"]`);
+                if (row) {
+                    const event = filtered.find(e => e.id === expandedEventId);
+                    if (event) {
+                        const detailRow = document.createElement('tr');
+                        detailRow.className = 'event-detail-row';
+                        detailRow.id = 'detail-' + expandedEventId;
+                        detailRow.innerHTML = `<td colspan="5"><div class="event-detail-content">${buildDetailHtml(event)}</div></td>`;
+                        row.classList.add('selected');
+                        row.after(detailRow);
+                    }
+                } else {
+                    expandedEventId = null;
+                }
+            }
         }
 
         function addEvent(event) {
