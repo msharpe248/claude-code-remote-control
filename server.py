@@ -135,6 +135,10 @@ class TerminalBackend(ABC):
         """Send Escape key to a session. Returns success."""
         return False  # Default implementation
 
+    def send_shift_tab(self, session: str) -> bool:
+        """Send Shift+Tab to a session (cycles Claude modes). Returns success."""
+        return False  # Default implementation
+
     def supports_terminal_attach(self) -> bool:
         """Whether this backend supports interactive terminal attachment."""
         return False
@@ -213,6 +217,15 @@ class TmuxBackend(TerminalBackend):
             return True
         except Exception as e:
             log.error(f"[tmux] Error sending Esc to {session}: {e}")
+            return False
+
+    def send_shift_tab(self, session: str) -> bool:
+        """Send Shift+Tab to tmux session (cycles Claude modes)."""
+        try:
+            subprocess.run(['tmux', 'send-keys', '-t', session, 'BTab'], check=True, timeout=5)
+            return True
+        except Exception as e:
+            log.error(f"[tmux] Error sending Shift+Tab to {session}: {e}")
             return False
 
     def supports_terminal_attach(self) -> bool:
@@ -623,6 +636,39 @@ class AccessibilityBackend(TerminalBackend):
             return False
         except Exception as e:
             log.error(f"[accessibility] Error sending Esc: {e}")
+            return False
+
+    def send_shift_tab(self, session: str) -> bool:
+        """Send Shift+Tab to the detected terminal (cycles Claude modes)."""
+        if not self._applescript_name:
+            log.error("[accessibility] No terminal detected, cannot send Shift+Tab")
+            return False
+
+        app_name = self._applescript_name
+        try:
+            # Key code 48 is Tab, with shift down
+            script = f'''
+            tell application "{app_name}" to activate
+            delay 0.2
+            tell application "System Events"
+                key code 48 using shift down
+            end tell
+            '''
+            result = subprocess.run(
+                ['osascript', '-e', script],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode != 0:
+                log.error(f"[accessibility] AppleScript error: {result.stderr}")
+                return False
+            return True
+        except subprocess.TimeoutExpired:
+            log.error("[accessibility] AppleScript timed out sending Shift+Tab")
+            return False
+        except Exception as e:
+            log.error(f"[accessibility] Error sending Shift+Tab: {e}")
             return False
 
     def supports_terminal_attach(self) -> bool:
@@ -1996,6 +2042,48 @@ MAIN_TEMPLATE = """
             font-size: 0.7rem;
             color: #666;
         }
+
+        /* Mode toggle button */
+        .mode-toggle {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            background: rgba(0,0,0,0.3);
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 8px;
+            padding: 0.6rem 1rem;
+            margin-bottom: 1rem;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .mode-toggle:hover {
+            background: rgba(0,0,0,0.4);
+            border-color: rgba(255,255,255,0.2);
+        }
+        .mode-toggle:active {
+            transform: scale(0.98);
+        }
+        .mode-info {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .mode-icon {
+            font-size: 1.1rem;
+            width: 1.5rem;
+            text-align: center;
+        }
+        .mode-icon.plan { color: #22d3ee; }
+        .mode-icon.edits { color: #a78bfa; }
+        .mode-icon.normal { color: #9ca3af; }
+        .mode-label {
+            font-size: 0.9rem;
+            color: #e5e7eb;
+        }
+        .mode-hint {
+            font-size: 0.75rem;
+            color: #6b7280;
+        }
     </style>
 </head>
 <body>
@@ -2109,6 +2197,13 @@ MAIN_TEMPLATE = """
                 <span class="idle-title">Claude is ready for a new task</span>
             </div>
             <div id="idle-reason" class="idle-reason" style="display: none;"></div>
+            <div class="mode-toggle" onclick="cycleMode()" id="mode-toggle">
+                <div class="mode-info">
+                    <span class="mode-icon normal" id="mode-icon">●</span>
+                    <span class="mode-label" id="mode-label">Normal mode</span>
+                </div>
+                <span class="mode-hint">⇧⇥ cycle</span>
+            </div>
             <div class="idle-input-group">
                 <input type="text" id="idle-input" placeholder="What would you like Claude to do?">
                 <button onclick="sendIdleInput()">Send</button>
@@ -2193,6 +2288,56 @@ MAIN_TEMPLATE = """
                 if(d.success) location.reload();
                 else alert('Error: ' + d.error);
             });
+        }
+
+        // Current mode tracking
+        let currentMode = 'normal';  // 'normal', 'plan', 'edits'
+
+        function cycleMode() {
+            fetch('/send-shift-tab', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({session: currentSession})
+            }).then(r => r.json()).then(d => {
+                if(d.success) {
+                    // Cycle through modes optimistically while waiting for terminal update
+                    const modes = ['normal', 'plan', 'edits'];
+                    const nextIndex = (modes.indexOf(currentMode) + 1) % modes.length;
+                    updateModeDisplay(modes[nextIndex]);
+                } else {
+                    alert('Error: ' + d.error);
+                }
+            });
+        }
+
+        function updateModeDisplay(mode) {
+            currentMode = mode;
+            const iconEl = document.getElementById('mode-icon');
+            const labelEl = document.getElementById('mode-label');
+            if (!iconEl || !labelEl) return;
+
+            if (mode === 'plan') {
+                iconEl.textContent = '⏸';
+                iconEl.className = 'mode-icon plan';
+                labelEl.textContent = 'Plan mode on';
+            } else if (mode === 'edits') {
+                iconEl.textContent = '▶▶';
+                iconEl.className = 'mode-icon edits';
+                labelEl.textContent = 'Accept edits on';
+            } else {
+                iconEl.textContent = '●';
+                iconEl.className = 'mode-icon normal';
+                labelEl.textContent = 'Normal mode';
+            }
+        }
+
+        function detectModeFromContent(content) {
+            if (!content) return 'normal';
+            // Check last 500 chars for mode indicators
+            const tail = content.slice(-500);
+            if (tail.includes('plan mode on')) return 'plan';
+            if (tail.includes('accept edits on')) return 'edits';
+            return 'normal';
         }
 
         function promptAndSendIdle() {
@@ -3767,6 +3912,23 @@ def send_esc():
         return jsonify({'success': True})
     else:
         return jsonify({'success': False, 'error': f'Failed to send Esc via {backend.name}'})
+
+@app.route('/send-shift-tab', methods=['POST'])
+@requires_auth
+def send_shift_tab():
+    """Send Shift+Tab to cycle Claude modes (plan/accept edits)."""
+    data = request.get_json()
+    session = data.get('session') or state.active_session
+
+    if not session:
+        return jsonify({'success': False, 'error': 'No session selected'})
+
+    success = backend.send_shift_tab(session)
+
+    if success:
+        return jsonify({'success': True})
+    else:
+        return jsonify({'success': False, 'error': f'Failed to send Shift+Tab via {backend.name}'})
 
 @app.route('/toggle-notifications', methods=['POST'])
 @requires_auth
