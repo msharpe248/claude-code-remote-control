@@ -2053,6 +2053,9 @@ MAIN_TEMPLATE = """
             </div>
             <div class="permission-meta">
                 <span>Via Hook Event</span>
+                <button class="permission-meta-btn" onclick="handlePermission('yes-all')">
+                    <span>⇧⇥</span> Allow all session
+                </button>
                 <button class="permission-meta-btn cancel" onclick="cancelPermission()">
                     <span>⎋</span> Cancel
                 </button>
