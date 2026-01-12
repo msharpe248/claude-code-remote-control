@@ -3253,7 +3253,7 @@ TERMINAL_TEMPLATE = """
 </head>
 <body>
     <div class="header">
-        <h1><a href="/" style="color: inherit; text-decoration: none;">Terminal: {{ session }}{% if polling_mode %} ({{ backend_name }}){% endif %}</a></h1>
+        <h1><a href="/" style="color: inherit; text-decoration: none;">Claude Remote Control</a></h1>
         <nav class="nav-links">
             <a href="/control?session={{ session }}">Control</a>
             <a href="/terminal?session={{ session }}" class="active">Terminal</a>
@@ -3663,7 +3663,7 @@ HOOKS_TEMPLATE = """
 </head>
 <body>
     <div class="container">
-        <h1><a href="/" style="color: inherit; text-decoration: none;">Hook Events{% if session %}: {{ session }}{% endif %}</a></h1>
+        <h1><a href="/" style="color: inherit; text-decoration: none;">Claude Remote Control</a></h1>
         <nav class="nav-links">
             <a href="/control{% if session %}?session={{ session }}{% endif %}">Control</a>
             <a href="/terminal{% if session %}?session={{ session }}{% endif %}">Terminal</a>
