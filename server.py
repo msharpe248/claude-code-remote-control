@@ -2437,6 +2437,7 @@ MAIN_TEMPLATE = """
             background: #374151;
             border-radius: 4px;
             font-size: 0.8rem;
+            margin-bottom: 1rem;
         }
         .context-indicator.hidden { display: none; }
         .context-bar {
