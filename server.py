@@ -1589,6 +1589,18 @@ MAIN_TEMPLATE = """
         [data-theme="light"] .idle-title {
             color: #1e40af;
         }
+        [data-theme="light"] .status.waiting {
+            background: #dcfce7;
+            color: #166534;
+        }
+        [data-theme="light"] .status.idle {
+            background: #dbeafe;
+            color: #1e40af;
+        }
+        [data-theme="light"] .status.compacting {
+            background: #f3e8ff;
+            color: #6b21a8;
+        }
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
