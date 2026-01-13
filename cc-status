@@ -72,7 +72,7 @@ get_claude_sessions() {
 
 # Check if server is running
 get_server_status() {
-    local server_pid=$(pgrep -f "python3.*server.py" 2>/dev/null | head -1 || true)
+    local server_pid=$(pgrep -f "python.*server.py" 2>/dev/null | head -1 || true)
     if [ -n "$server_pid" ]; then
         echo "$server_pid"
     fi
