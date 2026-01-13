@@ -728,6 +728,8 @@ class SessionState:
         self.last_notification_time = 0
         self.is_compacting = False  # Claude is compacting conversation
         self.compacting_started_at = 0  # When compacting was detected (for minimum display time)
+        self.mode = 'normal'  # Current mode: normal, plan, edits
+        self.context_left = None  # Context percentage remaining
         # Note: prompt detection fields removed - using hooks instead
 
 @dataclass
@@ -832,6 +834,42 @@ class GlobalState:
                 log.info(f"[hooks-ws] Failed to send to client: {e}")
                 dead_clients.append(client)
         # Remove dead clients
+        for client in dead_clients:
+            if client in self.hook_clients:
+                self.hook_clients.remove(client)
+
+    def broadcast_status(self, session_id: str, status: dict):
+        """Broadcast status update to all connected WebSocket clients."""
+        message = {
+            'type': 'status',
+            'session_id': session_id,
+            **status
+        }
+        message_json = json.dumps(message)
+        log.debug(f"[hooks-ws] Broadcasting status to {len(self.hook_clients)} clients: {status}")
+        dead_clients = []
+        for client in self.hook_clients:
+            try:
+                client.send(message_json)
+            except Exception as e:
+                log.debug(f"[hooks-ws] Failed to send status to client: {e}")
+                dead_clients.append(client)
+        for client in dead_clients:
+            if client in self.hook_clients:
+                self.hook_clients.remove(client)
+
+    def broadcast_sessions(self):
+        """Broadcast session list update to all connected WebSocket clients."""
+        message = {'type': 'sessions_changed'}
+        message_json = json.dumps(message)
+        log.debug(f"[hooks-ws] Broadcasting sessions_changed to {len(self.hook_clients)} clients")
+        dead_clients = []
+        for client in self.hook_clients:
+            try:
+                client.send(message_json)
+            except Exception as e:
+                log.debug(f"[hooks-ws] Failed to send sessions_changed to client: {e}")
+                dead_clients.append(client)
         for client in dead_clients:
             if client in self.hook_clients:
                 self.hook_clients.remove(client)
@@ -1149,20 +1187,29 @@ def watcher_loop():
             sessions = backend.get_sessions()
 
             # Log new sessions
+            sessions_changed = False
             for s in sessions:
                 if s not in known_sessions:
                     log.info(f"[{backend.name}] Found session: {s}")
                     known_sessions.add(s)
+                    sessions_changed = True
 
             # Log removed sessions
             for s in list(known_sessions):
                 if s not in sessions:
                     log.info(f"[{backend.name}] Session ended: {s}")
                     known_sessions.discard(s)
+                    sessions_changed = True
+
+            # Broadcast session list change
+            if sessions_changed:
+                state.broadcast_sessions()
 
             for session_name in sessions:
                 content = backend.get_content(session_name)
                 session_state = state.get_session(session_name)
+                status_changed = False
+                status_update = {}
 
                 # Check for compacting state (with minimum 3s display time)
                 # This is still terminal-based since there's no hook for compacting
@@ -1174,12 +1221,45 @@ def watcher_loop():
                     session_state.is_compacting = True
                     session_state.compacting_started_at = now
                     log.info(f"[{session_name}] Compacting conversation...")
+                    status_changed = True
+                    status_update['is_compacting'] = True
                 elif not is_compacting_now and session_state.is_compacting:
                     # Compacting might be done - but keep visible for minimum 3 seconds
                     elapsed = now - session_state.compacting_started_at
                     if elapsed >= 3.0:
                         session_state.is_compacting = False
                         log.info(f"[{session_name}] Compacting done")
+                        status_changed = True
+                        status_update['is_compacting'] = False
+
+                # Detect mode and context from terminal content
+                if content:
+                    tail = content.rstrip()[-500:]
+
+                    # Detect mode
+                    new_mode = 'normal'
+                    if 'accept edits on' in tail:
+                        new_mode = 'edits'
+                    elif 'plan mode on' in tail:
+                        new_mode = 'plan'
+
+                    if new_mode != session_state.mode:
+                        session_state.mode = new_mode
+                        status_changed = True
+                        status_update['mode'] = new_mode
+
+                    # Detect context percentage
+                    match = re.search(r'Context left until auto-compact: (\d+)%', tail)
+                    new_context = int(match.group(1)) if match else None
+
+                    if new_context != session_state.context_left:
+                        session_state.context_left = new_context
+                        status_changed = True
+                        status_update['context_left'] = new_context
+
+                # Broadcast status changes via WebSocket
+                if status_changed:
+                    state.broadcast_status(session_name, status_update)
 
                 # Note: Prompt detection removed - using hooks instead
 
@@ -2548,7 +2628,7 @@ MAIN_TEMPLATE = """
 
     <script>
         const currentSession = '{{ session }}';
-        let userInteracting = false;  // Track if user is interacting (pauses auto-refresh)
+        let userInteracting = false;  // Track if user is interacting
         let currentHookQuestion = null;  // Current AskUserQuestion being displayed
         let currentPermissionEvent = null;  // Current tool permission prompt being displayed
         let isClaudeIdle = {{ 'true' if is_idle else 'false' }};  // Track if Claude is idle
@@ -2731,58 +2811,13 @@ MAIN_TEMPLATE = """
             });
         }
 
-        function scheduleRefresh() {
-            setTimeout(() => {
-                // Don't refresh if user is interacting, page not visible, or a dialog is shown
-                if (!userInteracting && !currentHookQuestion && !currentPermissionEvent && !isClaudeIdle && document.visibilityState === 'visible') {
-                    location.reload();
-                } else {
-                    // Check again later
-                    scheduleRefresh();
-                }
-            }, 5000);
-        }
-        scheduleRefresh();
-
-        // Fast polling for compacting state to show/hide overlay immediately
+        // Compacting overlay setup (updates via WebSocket)
         const compactingOverlay = document.getElementById('compacting-overlay');
-        let lastCompactingState = {{ 'true' if is_compacting else 'false' }};
 
         // Show overlay immediately if already compacting on page load
-        if (lastCompactingState) {
+        if ({{ 'true' if is_compacting else 'false' }}) {
             compactingOverlay.classList.add('active');
         }
-
-        function checkCompactingState() {
-            fetch('/api/status?session=' + encodeURIComponent(currentSession))
-                .then(r => r.json())
-                .then(data => {
-                    const isCompacting = data.is_compacting || false;
-
-                    if (isCompacting !== lastCompactingState) {
-                        lastCompactingState = isCompacting;
-                        if (isCompacting) {
-                            compactingOverlay.classList.add('active');
-                        } else {
-                            compactingOverlay.classList.remove('active');
-                        }
-                    }
-
-                    // Update mode display from terminal content
-                    if (data.mode && data.mode !== currentMode) {
-                        updateModeDisplay(data.mode);
-                    }
-
-                    // Update context percentage indicator
-                    updateContextIndicator(data.context_left);
-                })
-                .catch(e => console.log('Status check failed:', e))
-                .finally(() => {
-                    // Poll every 1 second for responsive overlay
-                    setTimeout(checkCompactingState, 1000);
-                });
-        }
-        checkCompactingState();
 
         // Set initial mode display on page load
         updateModeDisplay(currentMode);
@@ -3245,6 +3280,28 @@ MAIN_TEMPLATE = """
 
                 try {
                     const event = JSON.parse(e.data);
+
+                    // Handle status updates (pushed from server)
+                    if (event.type === 'status') {
+                        console.log('Status update:', event);
+                        if (event.session_id === currentSession || event.session_id === '{{ session }}') {
+                            if ('is_compacting' in event) {
+                                if (event.is_compacting) {
+                                    compactingOverlay.classList.add('active');
+                                } else {
+                                    compactingOverlay.classList.remove('active');
+                                }
+                            }
+                            if ('mode' in event) {
+                                updateModeDisplay(event.mode);
+                            }
+                            if ('context_left' in event) {
+                                updateContextIndicator(event.context_left);
+                            }
+                        }
+                        return;
+                    }
+
                     // Visible debug logging
                     debugLog(`${event.event_type} | ${event.tool_name} | perm=${event.permission_mode} | rt=${isRealTime}`);
                     console.log('Hook event:', event.event_type, event.tool_name, 'isRealTime:', isRealTime, 'permission_mode:', event.permission_mode);
@@ -4580,6 +4637,20 @@ SESSIONS_TEMPLATE = """
             background: #4b5563;
             color: white;
         }
+        [data-theme="light"] .hook-badge.none {
+            background: #e5e7eb;
+            color: #4b5563;
+            border: 1px solid #d1d5db;
+        }
+        [data-theme="light"] .install-hooks-btn {
+            background: #e5e7eb;
+            color: #374151;
+            border-color: #d1d5db;
+        }
+        [data-theme="light"] .install-hooks-btn:hover {
+            background: #d1d5db;
+            color: #1f2937;
+        }
 
         .session-details {
             display: grid;
@@ -4960,8 +5031,37 @@ After adding hooks, restart Claude Code for changes to take effect.`;
         updateThemeIcon();
         loadSessions();
 
-        // Auto-refresh every 10 seconds
-        setInterval(loadSessions, 10000);
+        // WebSocket for real-time session updates
+        function connectSessionsWebSocket() {
+            const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const ws = new WebSocket(`${protocol}//${location.host}/ws/hooks`);
+
+            ws.onmessage = (e) => {
+                if (!e.data || !e.data.startsWith('{')) return;
+                try {
+                    const msg = JSON.parse(e.data);
+                    if (msg.type === 'sessions_changed') {
+                        console.log('Sessions changed, reloading...');
+                        loadSessions();
+                    }
+                } catch (err) {
+                    // Ignore parse errors
+                }
+            };
+
+            ws.onclose = () => {
+                // Reconnect after 3 seconds
+                setTimeout(connectSessionsWebSocket, 3000);
+            };
+
+            // Keep alive
+            setInterval(() => {
+                if (ws.readyState === WebSocket.OPEN) {
+                    ws.send('ping');
+                }
+            }, 25000);
+        }
+        connectSessionsWebSocket();
     </script>
 </body>
 </html>
