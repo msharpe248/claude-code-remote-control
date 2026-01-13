@@ -84,29 +84,44 @@ main() {
     echo -e "${BLUE}════════════════════════════════════${NC}"
     echo ""
 
-    # Backend detection
+    # Backend detection - query server if running, else detect locally
     echo -e "${BOLD}Backend:${NC}"
     local backend="none"
+    local server_pid=$(get_server_status)
 
-    if is_ghostty_running; then
-        echo -e "  ${GREEN}●${NC} Ghostty: ${GREEN}running${NC}"
-        backend="ghostty"
-    else
-        echo -e "  ${YELLOW}○${NC} Ghostty: not running"
+    if [ -n "$server_pid" ]; then
+        # Get backend info from server
+        local port=$(grep 'port:' "$SCRIPT_DIR/config.yaml" 2>/dev/null | head -1 | sed 's/.*port:[[:space:]]*//' | tr -d ' ' || echo "8765")
+        local server_backend=$(curl -s --max-time 2 "http://localhost:$port/api/status" 2>/dev/null | \
+            python3 -c "import sys,json; print(json.load(sys.stdin).get('backend','unknown'))" 2>/dev/null || echo "")
+        if [ -n "$server_backend" ] && [ "$server_backend" != "unknown" ]; then
+            echo -e "  ${GREEN}●${NC} $server_backend"
+            backend="$server_backend"
+        fi
     fi
 
-    local tmux_sessions=$(get_tmux_sessions)
-    if [ -n "$tmux_sessions" ]; then
-        local count=$(echo "$tmux_sessions" | wc -l | tr -d ' ')
-        echo -e "  ${GREEN}●${NC} tmux: ${GREEN}$count session(s)${NC}"
-        if [ "$backend" = "none" ]; then
-            backend="tmux"
-        fi
-    else
-        if command -v tmux &>/dev/null; then
-            echo -e "  ${YELLOW}○${NC} tmux: no sessions"
+    # Fall back to local detection if server not available
+    if [ "$backend" = "none" ]; then
+        if is_ghostty_running; then
+            echo -e "  ${GREEN}●${NC} Accessibility API (Ghostty): ${GREEN}available${NC}"
+            backend="accessibility"
         else
-            echo -e "  ${RED}○${NC} tmux: not installed"
+            echo -e "  ${YELLOW}○${NC} Accessibility API (Ghostty): not running"
+        fi
+
+        local tmux_sessions=$(get_tmux_sessions)
+        if [ -n "$tmux_sessions" ]; then
+            local count=$(echo "$tmux_sessions" | wc -l | tr -d ' ')
+            echo -e "  ${GREEN}●${NC} tmux: ${GREEN}$count session(s)${NC}"
+            if [ "$backend" = "none" ]; then
+                backend="tmux"
+            fi
+        else
+            if command -v tmux &>/dev/null; then
+                echo -e "  ${YELLOW}○${NC} tmux: no sessions"
+            else
+                echo -e "  ${RED}○${NC} tmux: not installed"
+            fi
         fi
     fi
     echo ""
