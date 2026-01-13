@@ -1511,17 +1511,67 @@ MAIN_TEMPLATE = """
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Claude Remote Control</title>
     <style>
+        /* Theme CSS Variables */
+        :root {
+            --bg-primary: #1a1a2e;
+            --bg-secondary: #0d0d1a;
+            --bg-tertiary: #2d2d4a;
+            --bg-card: #1e1e3f;
+            --text-primary: #eee;
+            --text-secondary: #ccc;
+            --text-muted: #888;
+            --text-heading: #ff6b6b;
+            --border-color: #333;
+            --accent-primary: #6366f1;
+            --accent-hover: #4f46e5;
+            --accent-success: #22c55e;
+            --accent-info: #60a5fa;
+            --overlay-bg: rgba(13, 13, 26, 0.95);
+        }
+        [data-theme="light"] {
+            --bg-primary: #f5f5f7;
+            --bg-secondary: #ffffff;
+            --bg-tertiary: #e5e5ea;
+            --bg-card: #ffffff;
+            --text-primary: #1d1d1f;
+            --text-secondary: #424245;
+            --text-muted: #6e6e73;
+            --text-heading: #dc2626;
+            --border-color: #d1d1d6;
+            --accent-primary: #6366f1;
+            --accent-hover: #4f46e5;
+            --accent-success: #16a34a;
+            --accent-info: #2563eb;
+            --overlay-bg: rgba(245, 245, 247, 0.95);
+        }
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: #1a1a2e;
-            color: #eee;
+            background: var(--bg-primary);
+            color: var(--text-primary);
             min-height: 100vh;
             padding: 1rem;
+            transition: background 0.3s, color 0.3s;
         }
         .container { max-width: 800px; margin: 0 auto; }
-        h1 { font-size: 1.5rem; margin-bottom: 1rem; color: #ff6b6b; }
-        h3 { margin: 1rem 0 0.5rem; color: #ccc; }
+        .page-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+        }
+        h1 { font-size: 1.5rem; color: var(--text-heading); }
+        h3 { margin: 1rem 0 0.5rem; color: var(--text-secondary); }
+        .theme-toggle {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            color: var(--text-primary);
+            padding: 8px 12px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 1rem;
+        }
+        .theme-toggle:hover { background: var(--bg-tertiary); }
 
         .status { padding: 1rem; border-radius: 8px; margin-bottom: 1rem; }
         .status.waiting { background: #2d4a3e; border-left: 4px solid #4ade80; }
@@ -1552,7 +1602,7 @@ MAIN_TEMPLATE = """
             left: 0;
             right: 0;
             bottom: 0;
-            background: rgba(13, 13, 26, 0.95);
+            background: var(--overlay-bg);
             display: flex;
             flex-direction: column;
             align-items: center;
@@ -1624,17 +1674,17 @@ MAIN_TEMPLATE = """
         .input-group input {
             flex: 1;
             padding: 0.875rem;
-            border: 1px solid #333;
+            border: 1px solid var(--border-color);
             border-radius: 8px;
-            background: #0d0d1a;
-            color: #eee;
+            background: var(--bg-secondary);
+            color: var(--text-primary);
             font-size: 1rem;
         }
 
         .links { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 1rem; }
-        .links a { color: #60a5fa; padding: 0.5rem; font-size: 0.9rem; }
+        .links a { color: var(--accent-info); padding: 0.5rem; font-size: 0.9rem; }
 
-        .meta { font-size: 0.75rem; color: #666; }
+        .meta { font-size: 0.75rem; color: var(--text-muted); }
 
         #refresh-indicator {
             position: fixed; top: 1rem; right: 1rem;
@@ -1654,14 +1704,14 @@ MAIN_TEMPLATE = """
         .session-tab {
             padding: 0.5rem 1rem;
             border-radius: 8px;
-            background: #374151;
-            color: #ccc;
+            background: var(--bg-tertiary);
+            color: var(--text-secondary);
             text-decoration: none;
             font-size: 0.85rem;
             position: relative;
         }
         .session-tab.active {
-            background: #6366f1;
+            background: var(--accent-primary);
             color: white;
         }
         .session-tab .badge {
@@ -1686,24 +1736,24 @@ MAIN_TEMPLATE = """
             flex-wrap: wrap;
         }
         .nav-links a {
-            color: #60a5fa;
+            color: var(--accent-info);
             text-decoration: none;
             padding: 0.5rem 1rem;
-            background: #0d0d1a;
+            background: var(--bg-secondary);
             border-radius: 6px;
             font-size: 0.9rem;
         }
-        .nav-links a:hover { background: #1a1a3e; }
+        .nav-links a:hover { background: var(--bg-tertiary); }
         .nav-links a.active {
-            background: #6366f1;
+            background: var(--accent-primary);
             color: white;
         }
 
         /* Rich Question UI from Hook Events */
         .hook-question-panel {
             display: none;
-            background: linear-gradient(135deg, #1e1e3f 0%, #2d1f3d 100%);
-            border: 1px solid #6366f1;
+            background: var(--bg-card);
+            border: 1px solid var(--accent-primary);
             border-radius: 12px;
             padding: 1.25rem;
             margin-bottom: 1rem;
@@ -1719,7 +1769,7 @@ MAIN_TEMPLATE = """
         }
         .hook-question-header {
             display: inline-block;
-            background: #6366f1;
+            background: var(--accent-primary);
             color: white;
             padding: 0.25rem 0.75rem;
             border-radius: 4px;
@@ -1731,7 +1781,7 @@ MAIN_TEMPLATE = """
         }
         .hook-question-text {
             font-size: 1.1rem;
-            color: #fff;
+            color: var(--text-primary);
             margin-bottom: 1rem;
             line-height: 1.4;
         }
@@ -1744,8 +1794,8 @@ MAIN_TEMPLATE = """
             display: flex;
             align-items: flex-start;
             gap: 0.75rem;
-            background: rgba(255,255,255,0.05);
-            border: 1px solid rgba(255,255,255,0.1);
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
             border-radius: 8px;
             padding: 0.875rem 1rem;
             cursor: pointer;
@@ -1753,12 +1803,12 @@ MAIN_TEMPLATE = """
             text-align: left;
         }
         .hook-option-btn:hover {
-            background: rgba(99, 102, 241, 0.2);
-            border-color: #6366f1;
+            background: var(--bg-tertiary);
+            border-color: var(--accent-primary);
             transform: translateX(4px);
         }
         .hook-option-num {
-            background: #6366f1;
+            background: var(--accent-primary);
             color: white;
             min-width: 28px;
             height: 28px;
@@ -1774,20 +1824,20 @@ MAIN_TEMPLATE = """
             flex: 1;
         }
         .hook-option-label {
-            color: #fff;
+            color: var(--text-primary);
             font-weight: 500;
             font-size: 0.95rem;
             margin-bottom: 0.25rem;
         }
         .hook-option-desc {
-            color: #9ca3af;
+            color: var(--text-muted);
             font-size: 0.8rem;
             line-height: 1.3;
         }
         .hook-question-meta {
             margin-top: 0.75rem;
             font-size: 0.7rem;
-            color: #666;
+            color: var(--text-muted);
         }
         .hook-question-source {
             display: inline-flex;
@@ -1804,7 +1854,7 @@ MAIN_TEMPLATE = """
             gap: 0.5rem;
             margin-top: 0.75rem;
             padding-top: 0.75rem;
-            border-top: 1px solid rgba(255,255,255,0.1);
+            border-top: 1px solid var(--border-color);
         }
         .hook-question-other input {
             flex: 1;
@@ -1815,13 +1865,25 @@ MAIN_TEMPLATE = """
             color: #fff;
             font-size: 0.95rem;
         }
+        [data-theme="light"] .hook-question-other input {
+            border-color: var(--border-color);
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+        }
         .hook-question-other input:focus {
             outline: none;
             border-color: #6366f1;
             background: rgba(99, 102, 241, 0.1);
         }
+        [data-theme="light"] .hook-question-other input:focus {
+            border-color: var(--accent-primary);
+            background: var(--bg-tertiary);
+        }
         .hook-question-other input::placeholder {
             color: #666;
+        }
+        [data-theme="light"] .hook-question-other input::placeholder {
+            color: var(--text-muted);
         }
         .hook-question-other button {
             padding: 0.75rem 1.25rem;
@@ -1871,6 +1933,9 @@ MAIN_TEMPLATE = """
             margin-bottom: 1rem;
             box-shadow: 0 4px 20px rgba(34, 197, 94, 0.2);
         }
+        [data-theme="light"] .permission-panel {
+            background: linear-gradient(135deg, #ecfdf5 0%, #d1fae5 100%);
+        }
         .permission-panel.active {
             display: block;
             animation: slideIn 0.3s ease;
@@ -1889,9 +1954,15 @@ MAIN_TEMPLATE = """
             color: #fff;
             font-weight: 500;
         }
+        [data-theme="light"] .permission-title {
+            color: #1d1d1f;
+        }
         .permission-tool {
             color: #4ade80;
             font-family: 'SF Mono', Monaco, monospace;
+        }
+        [data-theme="light"] .permission-tool {
+            color: #16a34a;
         }
         .permission-detail {
             background: rgba(0,0,0,0.3);
@@ -1905,6 +1976,10 @@ MAIN_TEMPLATE = """
             color: #ccc;
             white-space: pre-wrap;
             word-break: break-all;
+        }
+        [data-theme="light"] .permission-detail {
+            background: rgba(34, 197, 94, 0.1);
+            color: #424245;
         }
         .permission-options {
             display: flex;
@@ -1927,6 +2002,9 @@ MAIN_TEMPLATE = """
             border-color: rgba(34, 197, 94, 0.3);
             color: #4ade80;
         }
+        [data-theme="light"] .permission-btn.yes {
+            color: #16a34a;
+        }
         .permission-btn.yes:hover {
             background: rgba(34, 197, 94, 0.3);
             border-color: #22c55e;
@@ -1936,6 +2014,9 @@ MAIN_TEMPLATE = """
             border-color: rgba(59, 130, 246, 0.3);
             color: #60a5fa;
         }
+        [data-theme="light"] .permission-btn.yes-all {
+            color: #2563eb;
+        }
         .permission-btn.yes-all:hover {
             background: rgba(59, 130, 246, 0.3);
             border-color: #3b82f6;
@@ -1944,6 +2025,9 @@ MAIN_TEMPLATE = """
             background: rgba(239, 68, 68, 0.15);
             border-color: rgba(239, 68, 68, 0.3);
             color: #f87171;
+        }
+        [data-theme="light"] .permission-btn.no {
+            color: #dc2626;
         }
         .permission-btn.no:hover {
             background: rgba(239, 68, 68, 0.25);
@@ -1984,6 +2068,11 @@ MAIN_TEMPLATE = """
             background: rgba(0,0,0,0.3);
             color: #fff;
             font-size: 0.9rem;
+        }
+        [data-theme="light"] .permission-extra-input input {
+            border-color: rgba(34, 197, 94, 0.5);
+            background: rgba(34, 197, 94, 0.1);
+            color: #1d1d1f;
         }
         .permission-extra-input input:focus {
             outline: none;
@@ -2049,8 +2138,8 @@ MAIN_TEMPLATE = """
         /* Idle/Ready Panel - shown when Claude is waiting for new instructions */
         .idle-panel {
             display: none;
-            background: linear-gradient(135deg, rgba(59, 130, 246, 0.15) 0%, rgba(37, 99, 235, 0.1) 100%);
-            border: 1px solid rgba(59, 130, 246, 0.3);
+            background: var(--bg-card);
+            border: 1px solid var(--accent-info);
             border-radius: 12px;
             padding: 1.25rem;
             margin-bottom: 1rem;
@@ -2069,15 +2158,15 @@ MAIN_TEMPLATE = """
         }
         .idle-title {
             font-weight: 600;
-            color: #60a5fa;
+            color: var(--accent-info);
             font-size: 1.1rem;
         }
         .idle-reason {
             font-size: 0.85rem;
-            color: #94a3b8;
+            color: var(--text-secondary);
             margin-bottom: 1rem;
             padding: 0.5rem;
-            background: rgba(0,0,0,0.2);
+            background: var(--bg-secondary);
             border-radius: 6px;
         }
         .idle-input-group {
@@ -2091,7 +2180,12 @@ MAIN_TEMPLATE = """
             border-radius: 8px;
             background: rgba(0,0,0,0.3);
             color: #fff;
-            font-size: 1rem;
+            font-size: 16px;
+        }
+        [data-theme="light"] .idle-input-group input {
+            border-color: rgba(59, 130, 246, 0.5);
+            background: rgba(59, 130, 246, 0.1);
+            color: #1d1d1f;
         }
         .idle-input-group input:focus {
             outline: none;
@@ -2228,6 +2322,15 @@ MAIN_TEMPLATE = """
             min-width: 2rem;
         }
     </style>
+    <script>
+        // Theme management - runs before body renders to prevent flash
+        (function() {
+            const savedTheme = localStorage.getItem('claude-remote-theme') || 'dark';
+            if (savedTheme === 'light') {
+                document.documentElement.setAttribute('data-theme', 'light');
+            }
+        })();
+    </script>
 </head>
 <body>
     <!-- Compacting overlay - takes over the whole screen -->
@@ -2239,7 +2342,12 @@ MAIN_TEMPLATE = """
 
     <div id="refresh-indicator" title="Auto-refreshing"></div>
     <div class="container">
-        <h1><a href="/" style="color: inherit; text-decoration: none;">Claude Remote Control</a></h1>
+        <div class="page-header">
+            <h1><a href="/" style="color: inherit; text-decoration: none;">Claude Remote Control</a></h1>
+            <button class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark mode">
+                <span id="theme-icon">🌙</span>
+            </button>
+        </div>
 
         <nav class="nav-links">
             <a href="/control?session={{ session }}" class="active">Control</a>
@@ -3150,6 +3258,28 @@ MAIN_TEMPLATE = """
                 hookWs.send('ping');
             }
         }, 25000);
+
+        // Theme toggle
+        function toggleTheme() {
+            const html = document.documentElement;
+            const currentTheme = html.getAttribute('data-theme');
+            const newTheme = currentTheme === 'light' ? 'dark' : 'light';
+            if (newTheme === 'dark') {
+                html.removeAttribute('data-theme');
+            } else {
+                html.setAttribute('data-theme', 'light');
+            }
+            localStorage.setItem('claude-remote-theme', newTheme);
+            updateThemeIcon();
+        }
+
+        function updateThemeIcon() {
+            const isDark = !document.documentElement.getAttribute('data-theme');
+            document.getElementById('theme-icon').textContent = isDark ? '🌙' : '☀️';
+        }
+
+        // Initialize theme icon
+        updateThemeIcon();
     </script>
 </body>
 </html>
@@ -3164,37 +3294,73 @@ TERMINAL_TEMPLATE = """
     <title>Terminal - {{ session }}</title>
     {% if not polling_mode %}<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">{% endif %}
     <style>
+        /* Theme CSS Variables */
+        :root {
+            --bg-primary: #0d0d1a;
+            --bg-secondary: #1a1a2e;
+            --bg-tertiary: #1a1a3e;
+            --text-primary: #eee;
+            --text-secondary: #ccc;
+            --text-muted: #666;
+            --text-heading: #ff6b6b;
+            --border-color: #333;
+            --accent-primary: #6366f1;
+            --accent-info: #60a5fa;
+        }
+        [data-theme="light"] {
+            --bg-primary: #ffffff;
+            --bg-secondary: #f5f5f7;
+            --bg-tertiary: #e5e5ea;
+            --text-primary: #1d1d1f;
+            --text-secondary: #424245;
+            --text-muted: #6e6e73;
+            --text-heading: #dc2626;
+            --border-color: #d1d1d6;
+            --accent-primary: #6366f1;
+            --accent-info: #2563eb;
+        }
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
-            background: #0d0d1a;
+            background: var(--bg-primary);
             height: 100vh;
             display: flex;
             flex-direction: column;
+            transition: background 0.3s;
         }
         .header {
-            background: #1a1a2e;
+            background: var(--bg-secondary);
             padding: 0.5rem 1rem;
             display: flex;
             justify-content: space-between;
             align-items: center;
-            border-bottom: 1px solid #333;
+            border-bottom: 1px solid var(--border-color);
         }
-        .header h1 { font-size: 1rem; color: #ff6b6b; margin: 0; }
+        .header h1 { font-size: 1rem; color: var(--text-heading); margin: 0; }
+        .header-left { display: flex; align-items: center; gap: 1rem; }
+        .theme-toggle {
+            background: var(--bg-primary);
+            border: 1px solid var(--border-color);
+            color: var(--text-primary);
+            padding: 4px 8px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.9rem;
+        }
         .nav-links {
             display: flex;
             gap: 0.5rem;
         }
         .nav-links a {
-            color: #60a5fa;
+            color: var(--accent-info);
             text-decoration: none;
             padding: 0.35rem 0.75rem;
-            background: #0d0d1a;
+            background: var(--bg-primary);
             border-radius: 4px;
             font-size: 0.8rem;
         }
-        .nav-links a:hover { background: #1a1a3e; }
+        .nav-links a:hover { background: var(--bg-tertiary); }
         .nav-links a.active {
-            background: #6366f1;
+            background: var(--accent-primary);
             color: white;
         }
         #terminal-container {
@@ -3206,8 +3372,8 @@ TERMINAL_TEMPLATE = """
         #terminal-output {
             height: 100%;
             overflow-y: auto;
-            background: #0d0d1a;
-            color: #eee;
+            background: var(--bg-primary);
+            color: var(--text-primary);
             font-family: SF Mono, Monaco, Inconsolata, monospace;
             font-size: 12px;
             line-height: 1.4;
@@ -3216,11 +3382,11 @@ TERMINAL_TEMPLATE = """
             padding: 0.5rem;
         }
         .status-bar {
-            background: #1a1a2e;
+            background: var(--bg-secondary);
             padding: 0.25rem 1rem;
             font-size: 0.75rem;
-            color: #666;
-            border-top: 1px solid #333;
+            color: var(--text-muted);
+            border-top: 1px solid var(--border-color);
         }
         .connected { color: #4ade80; }
         .disconnected { color: #ef4444; }
@@ -3250,10 +3416,24 @@ TERMINAL_TEMPLATE = """
             cursor: pointer;
         }
     </style>
+    <script>
+        // Theme management - runs before body renders to prevent flash
+        (function() {
+            const savedTheme = localStorage.getItem('claude-remote-theme') || 'dark';
+            if (savedTheme === 'light') {
+                document.documentElement.setAttribute('data-theme', 'light');
+            }
+        })();
+    </script>
 </head>
 <body>
     <div class="header">
-        <h1><a href="/" style="color: inherit; text-decoration: none;">Claude Remote Control</a></h1>
+        <div class="header-left">
+            <h1><a href="/" style="color: inherit; text-decoration: none;">Claude Remote Control</a></h1>
+            <button class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark mode">
+                <span id="theme-icon">🌙</span>
+            </button>
+        </div>
         <nav class="nav-links">
             <a href="/control?session={{ session }}">Control</a>
             <a href="/terminal?session={{ session }}" class="active">Terminal</a>
@@ -3348,6 +3528,26 @@ TERMINAL_TEMPLATE = """
                 if (e.key === 'Enter') sendCommand();
             });
         }
+
+        // Theme toggle
+        function toggleTheme() {
+            const html = document.documentElement;
+            const currentTheme = html.getAttribute('data-theme');
+            const newTheme = currentTheme === 'light' ? 'dark' : 'light';
+            if (newTheme === 'dark') {
+                html.removeAttribute('data-theme');
+            } else {
+                html.setAttribute('data-theme', 'light');
+            }
+            localStorage.setItem('claude-remote-theme', newTheme);
+            updateThemeIcon();
+        }
+
+        function updateThemeIcon() {
+            const isDark = !document.documentElement.getAttribute('data-theme');
+            document.getElementById('theme-icon').textContent = isDark ? '🌙' : '☀️';
+        }
+        updateThemeIcon();
     </script>
     {% else %}
     <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
@@ -3427,6 +3627,26 @@ TERMINAL_TEMPLATE = """
             }
         });
 
+        // Theme toggle
+        function toggleTheme() {
+            const html = document.documentElement;
+            const currentTheme = html.getAttribute('data-theme');
+            const newTheme = currentTheme === 'light' ? 'dark' : 'light';
+            if (newTheme === 'dark') {
+                html.removeAttribute('data-theme');
+            } else {
+                html.setAttribute('data-theme', 'light');
+            }
+            localStorage.setItem('claude-remote-theme', newTheme);
+            updateThemeIcon();
+        }
+
+        function updateThemeIcon() {
+            const isDark = !document.documentElement.getAttribute('data-theme');
+            document.getElementById('theme-icon').textContent = isDark ? '🌙' : '☀️';
+        }
+        updateThemeIcon();
+
         connect();
     </script>
     {% endif %}
@@ -3442,19 +3662,61 @@ HOOKS_TEMPLATE = """
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Hook Events - Claude Remote Control</title>
     <style>
+        /* Theme CSS Variables */
+        :root {
+            --bg-primary: #1a1a2e;
+            --bg-secondary: #0d0d1a;
+            --bg-tertiary: #1a1a3e;
+            --text-primary: #eee;
+            --text-secondary: #ccc;
+            --text-muted: #888;
+            --text-heading: #ff6b6b;
+            --border-color: #333;
+            --accent-primary: #6366f1;
+            --accent-info: #60a5fa;
+        }
+        [data-theme="light"] {
+            --bg-primary: #f5f5f7;
+            --bg-secondary: #ffffff;
+            --bg-tertiary: #e5e5ea;
+            --text-primary: #1d1d1f;
+            --text-secondary: #424245;
+            --text-muted: #6e6e73;
+            --text-heading: #dc2626;
+            --border-color: #d1d1d6;
+            --accent-primary: #6366f1;
+            --accent-info: #2563eb;
+        }
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: #1a1a2e;
-            color: #eee;
+            background: var(--bg-primary);
+            color: var(--text-primary);
             min-height: 100vh;
+            transition: background 0.3s, color 0.3s;
         }
         .container {
             max-width: 1200px;
             margin: 0 auto;
             padding: 1rem;
         }
-        h1 { color: #ff6b6b; margin-bottom: 0.5rem; }
+        .page-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 0.5rem;
+        }
+        h1 { color: var(--text-heading); }
+        .theme-toggle {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            color: var(--text-primary);
+            padding: 8px 12px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 1rem;
+        }
+        .theme-toggle:hover { background: var(--bg-tertiary); }
         .nav-links {
             display: flex;
             gap: 1rem;
@@ -3462,15 +3724,15 @@ HOOKS_TEMPLATE = """
             flex-wrap: wrap;
         }
         .nav-links a {
-            color: #60a5fa;
+            color: var(--accent-info);
             text-decoration: none;
             padding: 0.5rem 1rem;
-            background: #0d0d1a;
+            background: var(--bg-secondary);
             border-radius: 6px;
         }
-        .nav-links a:hover { background: #1a1a3e; }
+        .nav-links a:hover { background: var(--bg-tertiary); }
         .nav-links a.active {
-            background: #6366f1;
+            background: var(--accent-primary);
             color: white;
         }
         .status-bar {
@@ -3478,7 +3740,7 @@ HOOKS_TEMPLATE = """
             align-items: center;
             gap: 1rem;
             padding: 0.75rem 1rem;
-            background: #0d0d1a;
+            background: var(--bg-secondary);
             border-radius: 8px;
             margin-bottom: 1rem;
         }
@@ -3507,9 +3769,9 @@ HOOKS_TEMPLATE = """
         }
         .filter-btn {
             padding: 0.4rem 0.8rem;
-            border: 1px solid #333;
-            background: #0d0d1a;
-            color: #ccc;
+            border: 1px solid var(--border-color);
+            background: var(--bg-secondary);
+            color: var(--text-secondary);
             border-radius: 4px;
             cursor: pointer;
             font-size: 0.85rem;
@@ -3660,10 +3922,24 @@ HOOKS_TEMPLATE = """
             grid-column: 1 / -1;
         }
     </style>
+    <script>
+        // Theme management - runs before body renders to prevent flash
+        (function() {
+            const savedTheme = localStorage.getItem('claude-remote-theme') || 'dark';
+            if (savedTheme === 'light') {
+                document.documentElement.setAttribute('data-theme', 'light');
+            }
+        })();
+    </script>
 </head>
 <body>
     <div class="container">
-        <h1><a href="/" style="color: inherit; text-decoration: none;">Claude Remote Control</a></h1>
+        <div class="page-header">
+            <h1><a href="/" style="color: inherit; text-decoration: none;">Claude Remote Control</a></h1>
+            <button class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark mode">
+                <span id="theme-icon">🌙</span>
+            </button>
+        </div>
         <nav class="nav-links">
             <a href="/control{% if session %}?session={{ session }}{% endif %}">Control</a>
             <a href="/terminal{% if session %}?session={{ session }}{% endif %}">Terminal</a>
@@ -4015,6 +4291,26 @@ HOOKS_TEMPLATE = """
                 ws.send('ping');
             }
         }, 25000);
+
+        // Theme toggle
+        function toggleTheme() {
+            const html = document.documentElement;
+            const currentTheme = html.getAttribute('data-theme');
+            const newTheme = currentTheme === 'light' ? 'dark' : 'light';
+            if (newTheme === 'dark') {
+                html.removeAttribute('data-theme');
+            } else {
+                html.setAttribute('data-theme', 'light');
+            }
+            localStorage.setItem('claude-remote-theme', newTheme);
+            updateThemeIcon();
+        }
+
+        function updateThemeIcon() {
+            const isDark = !document.documentElement.getAttribute('data-theme');
+            document.getElementById('theme-icon').textContent = isDark ? '🌙' : '☀️';
+        }
+        updateThemeIcon();
     </script>
 </body>
 </html>
@@ -4027,32 +4323,95 @@ SESSIONS_TEMPLATE = """
     <title>Sessions - Claude Remote Control</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
+        /* Theme CSS Variables */
+        :root {
+            --bg-primary: #0f172a;
+            --bg-secondary: #1e293b;
+            --bg-tertiary: #334155;
+            --bg-input: #0f172a;
+            --text-primary: #e2e8f0;
+            --text-secondary: #94a3b8;
+            --text-muted: #64748b;
+            --border-color: #334155;
+            --border-hover: #475569;
+            --accent-primary: #6366f1;
+            --accent-hover: #4f46e5;
+            --accent-success: #22c55e;
+            --accent-warning: #f59e0b;
+            --accent-danger: #ef4444;
+            --shadow-color: rgba(0, 0, 0, 0.3);
+            --card-bg: #1e293b;
+            --status-success-bg: #065f46;
+            --status-success-text: #a7f3d0;
+            --status-error-bg: #7f1d1d;
+            --status-error-text: #fecaca;
+        }
+        [data-theme="light"] {
+            --bg-primary: #f8fafc;
+            --bg-secondary: #ffffff;
+            --bg-tertiary: #e2e8f0;
+            --bg-input: #ffffff;
+            --text-primary: #1e293b;
+            --text-secondary: #475569;
+            --text-muted: #64748b;
+            --border-color: #cbd5e1;
+            --border-hover: #94a3b8;
+            --accent-primary: #6366f1;
+            --accent-hover: #4f46e5;
+            --accent-success: #16a34a;
+            --accent-warning: #d97706;
+            --accent-danger: #dc2626;
+            --shadow-color: rgba(0, 0, 0, 0.1);
+            --card-bg: #ffffff;
+            --status-success-bg: #dcfce7;
+            --status-success-text: #166534;
+            --status-error-bg: #fee2e2;
+            --status-error-text: #991b1b;
+        }
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: #0f172a;
-            color: #e2e8f0;
+            background: var(--bg-primary);
+            color: var(--text-primary);
             min-height: 100vh;
             padding: 20px;
+            transition: background 0.3s, color 0.3s;
         }
         .container { max-width: 900px; margin: 0 auto; }
-        h1 { margin-bottom: 20px; font-size: 1.5rem; }
+        .page-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        h1 { font-size: 1.5rem; }
+        .theme-toggle {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            color: var(--text-primary);
+            padding: 8px 12px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 1rem;
+            transition: all 0.2s;
+        }
+        .theme-toggle:hover { background: var(--bg-tertiary); }
         .nav-links {
             display: flex;
             gap: 15px;
             margin-bottom: 30px;
             padding-bottom: 15px;
-            border-bottom: 1px solid #334155;
+            border-bottom: 1px solid var(--border-color);
         }
         .nav-links a {
-            color: #94a3b8;
+            color: var(--text-secondary);
             text-decoration: none;
             padding: 8px 16px;
             border-radius: 6px;
             transition: all 0.2s;
         }
-        .nav-links a:hover { background: #1e293b; color: #e2e8f0; }
-        .nav-links a.active { background: #6366f1; color: white; }
+        .nav-links a:hover { background: var(--bg-secondary); color: var(--text-primary); }
+        .nav-links a.active { background: var(--accent-primary); color: white; }
 
         .sessions-header {
             display: flex;
@@ -4061,19 +4420,19 @@ SESSIONS_TEMPLATE = """
             margin-bottom: 20px;
         }
         .session-count {
-            color: #64748b;
+            color: var(--text-muted);
             font-size: 0.875rem;
         }
         .refresh-btn {
-            background: #1e293b;
-            border: 1px solid #334155;
-            color: #e2e8f0;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            color: var(--text-primary);
             padding: 8px 16px;
             border-radius: 6px;
             cursor: pointer;
             font-size: 0.875rem;
         }
-        .refresh-btn:hover { background: #334155; }
+        .refresh-btn:hover { background: var(--bg-tertiary); }
 
         .sessions-list {
             display: flex;
@@ -4081,12 +4440,13 @@ SESSIONS_TEMPLATE = """
             gap: 12px;
         }
         .session-card {
-            background: #1e293b;
-            border: 1px solid #334155;
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
             border-radius: 8px;
             padding: 16px;
+            transition: border-color 0.2s, box-shadow 0.2s;
         }
-        .session-card:hover { border-color: #475569; }
+        .session-card:hover { border-color: var(--border-hover); box-shadow: 0 2px 8px var(--shadow-color); }
 
         .session-header {
             display: flex;
@@ -4098,18 +4458,18 @@ SESSIONS_TEMPLATE = """
         .session-display-name {
             font-size: 1.125rem;
             font-weight: 600;
-            color: #f1f5f9;
+            color: var(--text-primary);
             margin-bottom: 4px;
         }
         .session-auto-name {
             font-size: 0.75rem;
-            color: #64748b;
+            color: var(--text-muted);
         }
         .session-id {
             font-family: monospace;
             font-size: 0.75rem;
-            color: #64748b;
-            background: #0f172a;
+            color: var(--text-muted);
+            background: var(--bg-primary);
             padding: 2px 6px;
             border-radius: 4px;
         }
@@ -4174,11 +4534,11 @@ SESSIONS_TEMPLATE = """
             font-size: 0.875rem;
         }
         .detail-label {
-            color: #64748b;
+            color: var(--text-muted);
             margin-right: 8px;
         }
         .detail-value {
-            color: #cbd5e1;
+            color: var(--text-secondary);
             font-family: monospace;
             word-break: break-all;
         }
@@ -4187,7 +4547,7 @@ SESSIONS_TEMPLATE = """
             display: flex;
             gap: 8px;
             padding-top: 12px;
-            border-top: 1px solid #334155;
+            border-top: 1px solid var(--border-color);
             flex-wrap: wrap;
         }
         .action-btn {
@@ -4231,21 +4591,21 @@ SESSIONS_TEMPLATE = """
             align-items: center;
             margin-top: 12px;
             padding-top: 12px;
-            border-top: 1px solid #334155;
+            border-top: 1px solid var(--border-color);
         }
         .rename-form.active { display: flex; }
         .rename-input {
             flex: 1;
             padding: 8px 12px;
-            border: 1px solid #334155;
+            border: 1px solid var(--border-color);
             border-radius: 4px;
-            background: #0f172a;
-            color: #e2e8f0;
+            background: var(--bg-input);
+            color: var(--text-primary);
             font-size: 0.875rem;
         }
         .rename-input:focus {
             outline: none;
-            border-color: #6366f1;
+            border-color: var(--accent-primary);
         }
         .save-btn {
             background: #059669;
@@ -4269,16 +4629,16 @@ SESSIONS_TEMPLATE = """
         .empty-state {
             text-align: center;
             padding: 60px 20px;
-            color: #64748b;
+            color: var(--text-muted);
         }
         .empty-state h2 {
             font-size: 1.25rem;
             margin-bottom: 12px;
-            color: #94a3b8;
+            color: var(--text-secondary);
         }
         .empty-state p { margin-bottom: 8px; }
         .empty-state code {
-            background: #1e293b;
+            background: var(--bg-secondary);
             padding: 2px 8px;
             border-radius: 4px;
             font-size: 0.875rem;
@@ -4292,19 +4652,33 @@ SESSIONS_TEMPLATE = """
         }
         .status-message.success {
             display: block;
-            background: #065f46;
-            color: #a7f3d0;
+            background: var(--status-success-bg);
+            color: var(--status-success-text);
         }
         .status-message.error {
             display: block;
-            background: #7f1d1d;
-            color: #fecaca;
+            background: var(--status-error-bg);
+            color: var(--status-error-text);
         }
     </style>
+    <script>
+        // Theme management - runs before body renders to prevent flash
+        (function() {
+            const savedTheme = localStorage.getItem('claude-remote-theme') || 'dark';
+            if (savedTheme === 'light') {
+                document.documentElement.setAttribute('data-theme', 'light');
+            }
+        })();
+    </script>
 </head>
 <body>
     <div class="container">
-        <h1><a href="/" style="color: inherit; text-decoration: none;">Claude Remote Control</a></h1>
+        <div class="page-header">
+            <h1><a href="/" style="color: inherit; text-decoration: none;">Claude Remote Control</a></h1>
+            <button class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark mode">
+                <span id="theme-icon">🌙</span>
+            </button>
+        </div>
 
         <div id="status-message" class="status-message"></div>
 
@@ -4507,7 +4881,26 @@ After adding hooks, restart Claude Code for changes to take effect.`;
             });
         }
 
+        // Theme toggle
+        function toggleTheme() {
+            const html = document.documentElement;
+            const currentTheme = html.getAttribute('data-theme');
+            const newTheme = currentTheme === 'light' ? 'dark' : 'light';
+            html.setAttribute('data-theme', newTheme === 'light' ? 'light' : '');
+            if (newTheme === 'dark') {
+                html.removeAttribute('data-theme');
+            }
+            localStorage.setItem('claude-remote-theme', newTheme);
+            updateThemeIcon();
+        }
+
+        function updateThemeIcon() {
+            const isDark = !document.documentElement.getAttribute('data-theme');
+            document.getElementById('theme-icon').textContent = isDark ? '🌙' : '☀️';
+        }
+
         // Initial load
+        updateThemeIcon();
         loadSessions();
 
         // Auto-refresh every 10 seconds
