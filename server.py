@@ -1544,6 +1544,51 @@ MAIN_TEMPLATE = """
             --accent-info: #2563eb;
             --overlay-bg: rgba(245, 245, 247, 0.95);
         }
+        /* Light mode component overrides */
+        [data-theme="light"] .global-mode-bar {
+            background: #e5e7eb;
+        }
+        [data-theme="light"] .global-mode-bar:hover {
+            background: #d1d5db;
+        }
+        [data-theme="light"] .global-mode-bar:active {
+            background: #c4c8cf;
+        }
+        [data-theme="light"] .global-mode-text {
+            color: #374151;
+        }
+        [data-theme="light"] .global-mode-hint {
+            color: #6b7280;
+        }
+        [data-theme="light"] .mode-toggle {
+            background: rgba(0,0,0,0.05);
+            border-color: rgba(0,0,0,0.15);
+        }
+        [data-theme="light"] .mode-toggle:hover {
+            background: rgba(0,0,0,0.1);
+            border-color: rgba(0,0,0,0.2);
+        }
+        [data-theme="light"] .mode-label {
+            color: #374151;
+        }
+        [data-theme="light"] .mode-hint {
+            color: #6b7280;
+        }
+        [data-theme="light"] .context-indicator {
+            background: #e5e7eb;
+        }
+        [data-theme="light"] .context-bar {
+            background: #d1d5db;
+        }
+        [data-theme="light"] .context-text {
+            color: #4b5563;
+        }
+        [data-theme="light"] .idle-panel {
+            background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%);
+        }
+        [data-theme="light"] .idle-title {
+            color: #1e40af;
+        }
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
