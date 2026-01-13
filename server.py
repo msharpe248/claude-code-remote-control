@@ -3005,11 +3005,38 @@ MAIN_TEMPLATE = """
 
             // Format the tool input for display
             let detailText = '';
-            if (event.tool_input) {
-                if (typeof event.tool_input === 'string') {
-                    detailText = event.tool_input;
+            var inp = event.tool_input;
+            if (inp) {
+                if (typeof inp === 'string') {
+                    detailText = inp;
+                } else if (event.tool_name === 'Bash' && inp.command) {
+                    detailText = inp.command;
+                } else if (event.tool_name === 'Edit' && inp.file_path) {
+                    detailText = 'File: ' + inp.file_path;
+                    if (inp.old_string) {
+                        var oldPrev = inp.old_string.length > 200 ? inp.old_string.slice(0, 200) + '...' : inp.old_string;
+                        detailText += '\\n\\nFind:\\n' + oldPrev;
+                    }
+                    if (inp.new_string) {
+                        var newPrev = inp.new_string.length > 200 ? inp.new_string.slice(0, 200) + '...' : inp.new_string;
+                        detailText += '\\n\\nReplace:\\n' + newPrev;
+                    }
+                } else if (event.tool_name === 'Write' && inp.file_path) {
+                    detailText = 'File: ' + inp.file_path;
+                    if (inp.content) {
+                        var contentPrev = inp.content.length > 300 ? inp.content.slice(0, 300) + '...' : inp.content;
+                        detailText += '\\n\\nContent:\\n' + contentPrev;
+                    }
+                } else if (event.tool_name === 'Read' && inp.file_path) {
+                    detailText = 'File: ' + inp.file_path;
+                } else if (event.tool_name === 'Grep' && inp.pattern) {
+                    detailText = 'Pattern: ' + inp.pattern;
+                    if (inp.path) detailText += '\\nPath: ' + inp.path;
+                } else if (event.tool_name === 'Glob' && inp.pattern) {
+                    detailText = 'Pattern: ' + inp.pattern;
+                    if (inp.path) detailText += '\\nPath: ' + inp.path;
                 } else {
-                    detailText = JSON.stringify(event.tool_input, null, 2);
+                    detailText = JSON.stringify(inp, null, 2);
                 }
             }
             detailEl.textContent = detailText || 'No details available';
