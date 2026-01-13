@@ -125,32 +125,57 @@ main() {
     fi
     echo ""
 
-    # Claude sessions - try to get from server first, fall back to process detection
-    local server_sessions=""
+    # Claude sessions - get from server API which distinguishes hooked vs detected
+    local hooked_sessions=""
+    local other_sessions=""
     if [ -n "$server_pid" ]; then
         local port=$(grep 'port:' "$SCRIPT_DIR/config.yaml" 2>/dev/null | head -1 | sed 's/.*port:[[:space:]]*//' | tr -d ' ' || echo "8765")
-        # Query server API for sessions (no auth needed for status endpoint typically)
-        server_sessions=$(curl -s --max-time 2 "http://localhost:$port/api/status" 2>/dev/null | \
-            python3 -c "import sys,json; d=json.load(sys.stdin); s=d.get('sessions',[]); print('\n'.join(s) if isinstance(s,list) else '\n'.join(s.keys()))" 2>/dev/null || true)
+        # Query /api/sessions which provides source info (hooks vs process)
+        local api_response=$(curl -s --max-time 2 "http://localhost:$port/api/sessions" 2>/dev/null || true)
+        if [ -n "$api_response" ]; then
+            hooked_sessions=$(echo "$api_response" | python3 -c "
+import sys,json
+try:
+    d=json.load(sys.stdin)
+    for s in d.get('sessions',[]):
+        if s.get('source')=='hooks':
+            print(s.get('display_name','unknown'))
+except: pass
+" 2>/dev/null || true)
+            other_sessions=$(echo "$api_response" | python3 -c "
+import sys,json
+try:
+    d=json.load(sys.stdin)
+    for s in d.get('sessions',[]):
+        if s.get('source')=='process':
+            print(f\"{s.get('display_name','unknown')}|{s.get('pid','')}|{s.get('hook_status','none')}\")
+except: pass
+" 2>/dev/null || true)
+        fi
     fi
 
     echo -e "${BOLD}Active Sessions (via hooks):${NC}"
-    if [ -n "$server_sessions" ]; then
-        echo "$server_sessions" | while read -r sess; do
+    if [ -n "$hooked_sessions" ]; then
+        echo "$hooked_sessions" | while read -r sess; do
             [ -n "$sess" ] && echo -e "  ${BOLD}${YELLOW}✻${NC} ${BOLD}$sess${NC}"
         done
     else
-        echo -e "  ${YELLOW}○${NC} None detected"
-        echo -e "  ${CYAN}→${NC} Sessions appear here when hooks are configured"
+        echo -e "  ${YELLOW}○${NC} None"
+        if [ -z "$server_pid" ]; then
+            echo -e "  ${CYAN}→${NC} Start server to see hooked sessions"
+        else
+            echo -e "  ${CYAN}→${NC} Configure hooks in ~/.claude/settings.json"
+        fi
     fi
     echo ""
 
-    # Show detected Claude processes
-    local sessions=$(get_claude_sessions)
-    if [ -n "$sessions" ]; then
-        echo -e "${BOLD}Claude Processes:${NC}"
-        echo "$sessions" | while IFS='|' read -r pid tty; do
-            [ -n "$pid" ] && echo -e "  ${GREEN}●${NC} PID: $pid (TTY: $tty)"
+    # Show other Claude instances (detected but not hooked)
+    if [ -n "$other_sessions" ]; then
+        echo -e "${BOLD}Other Claude Instances:${NC} ${YELLOW}(no hooks)${NC}"
+        echo "$other_sessions" | while IFS='|' read -r name pid hook_status; do
+            if [ -n "$name" ]; then
+                echo -e "  ${YELLOW}○${NC} $name (PID: $pid)"
+            fi
         done
         echo ""
     fi
