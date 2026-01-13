@@ -36,6 +36,7 @@ Control Claude Code from your phone. Get push notifications with action buttons 
 - **Hook Events Viewer** - Real-time log of all Claude Code hook events at `/hooks`
 - **Mobile-Friendly Control Panel** - Responsive UI optimized for phone browsers
 - **Pause Toggle** - Pause notifications from the web UI when actively working
+- **Light/Dark Theme** - Toggle between light and dark mode, preference saved in browser
 - **Single Port** - Everything runs on one port (8765), no ttyd needed
 
 ## Quick Start
@@ -203,6 +204,7 @@ terminal:
 - **Permission Dialogs** - Approve/deny tool usage with context preview
 - **Idle Panel** - Input field when Claude is ready for new tasks
 - **Status Indicator** - Shows current state (working, idle, compacting)
+- **Theme Toggle** - Switch between light and dark mode (sun/moon icon in header)
 - Cancel/interrupt button for emergencies
 - Link to full terminal
 
