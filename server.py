@@ -979,7 +979,7 @@ def get_local_ip():
 def get_ntfy_topic(session=None):
     """Build ntfy topic from prefix + session name."""
     cfg = config['notifications']['ntfy']
-    prefix = cfg.get('topic_prefix', 'claude-remote')
+    prefix = cfg.get('topic_prefix', 'claude')
     # Use provided session, or fall back to config default
     if session is None:
         session = config['tmux']['session_name']
@@ -5256,7 +5256,7 @@ def main():
     local_ip = get_local_ip()
     port = config['server']['port']
     sessions = backend.get_sessions()
-    ntfy_prefix = config['notifications']['ntfy'].get('topic_prefix', 'claude-remote')
+    ntfy_prefix = config['notifications']['ntfy'].get('topic_prefix', 'claude')
 
     # Check backend availability
     accessibility_status = "available" if (_accessibility_backend and _accessibility_backend.is_available()) else "not available"

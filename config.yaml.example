@@ -119,7 +119,7 @@ terminal_backend:
 tmux:
   # Default session name (used as fallback when no sessions are active)
   # The server auto-discovers and monitors all tmux sessions
-  session_name: "claude-remote"
+  session_name: "claude"
 
 # ----------------------------------------------------------------------------
 # PROMPT DETECTION

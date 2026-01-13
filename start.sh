@@ -188,20 +188,10 @@ print_info() {
     echo -e "    Password: changeme  ${RED}(change in config.yaml!)${NC}"
     echo ""
 
-    if [ "$DETECTED_BACKEND" = "ghostty" ]; then
-        echo -e "  ${YELLOW}To start Claude Code (Ghostty mode):${NC}"
-        echo -e "    Open a new Ghostty terminal and run:"
-        echo -e "    ${GREEN}./claude-remote -s $SESSION_NAME${NC}"
-        echo ""
-        echo -e "  ${BLUE}Tip:${NC} Use different session names for multiple projects:"
-        echo -e "    ./claude-remote -s work"
-        echo -e "    ./claude-remote -s personal"
-    else
-        echo -e "  ${YELLOW}To start Claude Code (tmux mode):${NC}"
-        echo -e "    ./claude-remote -s $SESSION_NAME"
-        echo -e "    ${BLUE}or${NC}"
-        echo -e "    tmux attach -t $SESSION_NAME && claude"
-    fi
+    echo -e "  ${YELLOW}To use Claude Code with remote control:${NC}"
+    echo -e "    1. Configure hooks in ~/.claude/settings.json (see README)"
+    echo -e "    2. Run ${GREEN}claude${NC} in any terminal"
+    echo -e "    3. Sessions will appear automatically via hooks"
     echo ""
     echo -e "  ${YELLOW}For iOS notifications (ntfy):${NC}"
     echo -e "    1. Install 'ntfy' app from App Store"

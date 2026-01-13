@@ -86,7 +86,6 @@ if $FULL_UNINSTALL; then
         "server.py"
         "start.sh"
         "install.sh"
-        "claude-remote"
         "config.yaml"
         "README.md"
         ".gitignore"

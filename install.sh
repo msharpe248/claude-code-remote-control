@@ -49,8 +49,9 @@ echo -e "${GREEN}Python environment ready${NC}"
 # Make scripts executable
 chmod +x start.sh
 chmod +x install.sh
-chmod +x claude-remote
 chmod +x uninstall.sh
+chmod +x hooks/notify.sh
+chmod +x cc-status cc-logs cc-diagnose cc-test-notify
 
 # Generate a random password
 RANDOM_PASS=$(openssl rand -base64 12 | tr -dc 'a-zA-Z0-9' | head -c12)
@@ -97,6 +98,7 @@ echo ""
 echo -e "  3. Start the server:"
 echo -e "     ${BLUE}./start.sh${NC}"
 echo ""
-echo -e "  4. Start Claude Code (in another terminal):"
-echo -e "     ${BLUE}./claude-remote${NC}"
+echo -e "  4. Configure Claude Code hooks:"
+echo -e "     Add hooks/notify.sh to ~/.claude/settings.json (see README)"
+echo -e "     Then run ${BLUE}claude${NC} in any terminal"
 echo ""
